@@ -1,0 +1,87 @@
+try:
+    from pymongo import MongoClient
+except ImportError as e:
+    raise ImportError("pymongo is required. Install it with 'pip install pymongo'.") from e
+import os
+import datetime
+from dotenv import load_dotenv
+load_dotenv()
+
+client = MongoClient(os.getenv("MONGODB_CONNECTION_STRING"));
+db = client['MMADatabase']
+
+rankings_collection = db['rankings']
+upcomingevents_collection = db['upcomingevents']
+pastevents_collection = db['pastevents']
+fighterlogs_collection = db['fighterlogs']
+
+def store_ranking(category, champion, fighters, gender):
+    rankings_collection.update_one(
+    {"category": category, "gender": gender},
+    {"$set": {
+        "category": category,
+        "champion": champion,
+        "fighters": fighters,
+        "gender": gender,
+        "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
+    }},
+    upsert=True
+)
+    print('Ranking Updated')
+    
+def store_upcoming_events(event):
+    upcomingevents_collection.update_one(
+    {"event_name": event['event_name'], "event_date": event['event_date']},
+    {"$set": {
+        "event_name": event['event_name'],
+        "event_date": event['event_date'],
+        "event_location": event['event_location'],
+        "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
+    }},
+    upsert=True
+)
+    print('Upcoming Event Updated')
+    
+def store_past_events(event):
+    pastevents_collection.update_one(
+    {"event_name": event['event_name'], "event_date": event['event_date']},
+    {"$set": {
+        "event_name": event['event_name'],
+        "event_date": event['event_date'],
+        "event_location": event['event_location'],
+        "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
+    }},
+    upsert=True
+)
+    print('Past Event Updated')
+
+def store_fighter(fighter):
+    fighterlogs_collection.update_one(
+    {"first_name": fighter['first_name'], "last_name": fighter['last_name']},
+    {"$set": {
+        "first_name": fighter['first_name'],
+        "last_name": fighter['last_name'],
+        "nickname": fighter['nickname'],
+        "height": fighter['height'],
+        "weight": fighter['weight'],
+        "reach": fighter['reach'],
+        "stance": fighter['stance'],
+        "wins": fighter['wins'],
+        "losses": fighter['losses'],
+        "draws": fighter['draws'],
+        "profile_link": fighter['profile_link'],
+        "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
+    }},
+    upsert=True
+)
+    print('Fighter Updated')
+
+if __name__ == "__main__":
+    print("=== Running all UFC data updates ===")
+    import rankings
+    import upcoming_events
+    import past_events
+    import fighter_profile
+    print("\n=== All updates completed ===")
+
+
