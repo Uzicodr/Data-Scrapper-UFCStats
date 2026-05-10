@@ -76,12 +76,14 @@ def store_fighter(fighter):
 )
     print('Fighter Updated')
 
-if __name__ == "__main__":
-    print("=== Running all UFC data updates ===")
+
+def run_all():
     import rankings
     import upcoming_events
     import past_events
     import fighter_profile
+
+if __name__ == "__main__":
+    print("=== Running all UFC data updates ===")
+    run_all()
     print("\n=== All updates completed ===")
-
-
