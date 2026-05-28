@@ -99,9 +99,9 @@ def store_fighter(fighter):
 
 
 def run_all():
-    # import rankings
-    # import upcoming_events
-    # import past_events
+    import rankings
+    import upcoming_events
+    import past_events
     import fighter_profile
 
 if __name__ == "__main__":
