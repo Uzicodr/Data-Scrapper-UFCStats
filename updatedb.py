@@ -91,6 +91,15 @@ def store_fighter(fighter):
         "losses": fighter['losses'],
         "draws": fighter['draws'],
         "profile_link": fighter['profile_link'],
+        "dob": fighter.get('dob', ''),
+        "slpm": fighter.get('slpm', ''),
+        "striking_accuracy": fighter.get('striking_accuracy', ''),
+        "sapm": fighter.get('sapm', ''),
+        "striking_defense": fighter.get('striking_defense', ''),
+        "td_avg": fighter.get('td_avg', ''),
+        "td_accuracy": fighter.get('td_accuracy', ''),
+        "td_defense": fighter.get('td_defense', ''),
+        "submission_avg": fighter.get('submission_avg', ''),
         "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
     }},
     upsert=True
@@ -99,10 +108,11 @@ def store_fighter(fighter):
 
 
 def run_all():
+    import fighter_profile
+    fighter_profile.scrape_fighters()
     import rankings
     import upcoming_events
     import past_events
-    import fighter_profile
 
 if __name__ == "__main__":
     print("=== Running all UFC data updates ===")
