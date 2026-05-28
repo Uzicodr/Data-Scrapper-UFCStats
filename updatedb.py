@@ -4,10 +4,49 @@ except ImportError as e:
     raise ImportError("pymongo is required. Install it with 'pip install pymongo'.") from e
 import os
 import datetime
+import time
 from dotenv import load_dotenv
+from pymongo.errors import ConfigurationError
 load_dotenv()
 
-client = MongoClient(os.getenv("MONGODB_CONNECTION_STRING"));
+def get_mongodb_uri():
+    uri = os.getenv("MONGODB_CONNECTION_STRING") or os.getenv("MONGODB_URI")
+    if uri and uri.startswith("MONGODB_URI="):
+        uri = uri.split("=", 1)[1]
+
+    if not uri:
+        raise RuntimeError(
+            "Missing MongoDB connection string. Set MONGODB_CONNECTION_STRING "
+            "or MONGODB_URI in your .env file."
+        )
+
+    if not uri.startswith(("mongodb://", "mongodb+srv://")):
+        raise RuntimeError(
+            "Invalid MongoDB connection string. It must start with "
+            "mongodb:// or mongodb+srv://."
+        )
+
+    return uri
+
+
+def create_mongo_client():
+    last_error = None
+    for attempt in range(3):
+        try:
+            return MongoClient(get_mongodb_uri(), serverSelectionTimeoutMS=10000)
+        except ConfigurationError as error:
+            last_error = error
+            if attempt < 2:
+                print("MongoDB DNS lookup failed. Retrying...")
+                time.sleep(2)
+
+    raise RuntimeError(
+        "Could not resolve the MongoDB Atlas host. Check your internet/DNS, "
+        "or use a non-SRV mongodb:// connection string in .env."
+    ) from last_error
+
+
+client = create_mongo_client()
 db = client['MMADatabase']
 
 rankings_collection = db['rankings']

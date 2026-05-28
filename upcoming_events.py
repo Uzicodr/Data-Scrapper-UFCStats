@@ -1,11 +1,12 @@
 from bs4 import BeautifulSoup
-import requests
-from updatedb import store_upcoming_events, upcomingevents_collection
+from updatedb import store_upcoming_events
+from ufcstats_client import fetch_ufcstats_page
 
-webpage = requests.get('http://ufcstats.com/statistics/events/upcoming?page=all')
-soup = BeautifulSoup(webpage.text, 'lxml')
+html = fetch_ufcstats_page('http://ufcstats.com/statistics/events/upcoming?page=all')
+soup = BeautifulSoup(html, 'lxml')
 
 rows = soup.find_all('tr', class_='b-statistics__table-row')
+updated_count = 0
 
 for row in rows:
     content = row.find('i', class_='b-statistics__table-content')
@@ -26,5 +27,7 @@ for row in rows:
         'event_location' : event_location
     }
 
-    if upcomingevents_collection.find_one({"event_name": event_name, "event_date": event_date}) is None:
-        store_upcoming_events(entry)
+    store_upcoming_events(entry)
+    updated_count += 1
+
+print(f"Upcoming events updated: {updated_count}")
