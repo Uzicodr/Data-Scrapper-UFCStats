@@ -4,9 +4,7 @@ except ImportError as e:
     raise ImportError("pymongo is required. Install it with 'pip install pymongo'.") from e
 import os
 import datetime
-import time
 from dotenv import load_dotenv
-from pymongo.errors import ConfigurationError
 load_dotenv()
 
 def get_mongodb_uri():
@@ -29,24 +27,7 @@ def get_mongodb_uri():
     return uri
 
 
-def create_mongo_client():
-    last_error = None
-    for attempt in range(3):
-        try:
-            return MongoClient(get_mongodb_uri(), serverSelectionTimeoutMS=10000)
-        except ConfigurationError as error:
-            last_error = error
-            if attempt < 2:
-                print("MongoDB DNS lookup failed. Retrying...")
-                time.sleep(2)
-
-    raise RuntimeError(
-        "Could not resolve the MongoDB Atlas host. Check your internet/DNS, "
-        "or use a non-SRV mongodb:// connection string in .env."
-    ) from last_error
-
-
-client = create_mongo_client()
+client = MongoClient(get_mongodb_uri())
 db = client['MMADatabase']
 
 rankings_collection = db['rankings']
@@ -69,6 +50,7 @@ def store_ranking(category, champion, fighters, gender):
     print('Ranking Updated')
     
 def store_upcoming_events(event):
+
     upcomingevents_collection.update_one(
     {"event_name": event['event_name'], "event_date": event['event_date']},
     {"$set": {
@@ -117,9 +99,9 @@ def store_fighter(fighter):
 
 
 def run_all():
-    import rankings
-    import upcoming_events
-    import past_events
+    # import rankings
+    # import upcoming_events
+    # import past_events
     import fighter_profile
 
 if __name__ == "__main__":

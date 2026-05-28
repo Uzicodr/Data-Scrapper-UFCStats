@@ -1,6 +1,6 @@
 from bs4 import BeautifulSoup
-import requests
 from updatedb import store_fighter
+from ufcstats_client import fetch_ufcstats_page
 import string
 
 characters = list(string.ascii_lowercase)
@@ -12,8 +12,8 @@ for char in characters:
     print(f"\nFetching fighters starting with '{char.upper()}'...")
     
     try:
-        webpage = requests.get(url)
-        soup = BeautifulSoup(webpage.text, 'lxml')
+        html = fetch_ufcstats_page(url)
+        soup = BeautifulSoup(html, 'lxml')
         
         rows = soup.find_all('tr', class_='b-statistics__table-row')
         
