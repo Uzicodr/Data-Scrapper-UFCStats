@@ -57,6 +57,8 @@ def store_upcoming_events(event):
         "event_name": event['event_name'],
         "event_date": event['event_date'],
         "event_location": event['event_location'],
+        "event_link": event.get('event_link', ''),
+        "fights": event.get('fights', []),
         "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
     }},
     upsert=True
@@ -70,6 +72,8 @@ def store_past_events(event):
         "event_name": event['event_name'],
         "event_date": event['event_date'],
         "event_location": event['event_location'],
+        "event_link": event.get('event_link', ''),
+        "fights": event.get('fights', []),
         "last_updated": datetime.datetime.today().strftime('%Y-%m-%d')
     }},
     upsert=True
@@ -108,8 +112,8 @@ def store_fighter(fighter):
 
 
 def run_all():
-    import fighter_profile
-    fighter_profile.scrape_fighters()
+    # import fighter_profile
+    # fighter_profile.scrape_fighters()
     import rankings
     import upcoming_events
     import past_events

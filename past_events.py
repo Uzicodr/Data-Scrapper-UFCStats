@@ -1,4 +1,5 @@
 from bs4 import BeautifulSoup
+from fight_details import fetch_event_fights
 from updatedb import store_past_events
 from ufcstats_client import fetch_ufcstats_page
 
@@ -17,14 +18,22 @@ for row in rows:
     if not content or not location_td:
         continue
 
+    event_link = content.find('a').get('href', '')
     event_name = content.find('a').text.strip()
     event_date = content.find('span').text.strip()
     event_location = location_td.text.strip()
+    try:
+        fights = fetch_event_fights(event_link)
+    except Exception as exc:
+        print(f"Could not fetch fights for {event_name}: {exc}")
+        fights = []
 
     entry = {
         'event_name' : event_name,
         'event_date' : event_date,
-        'event_location' : event_location
+        'event_location' : event_location,
+        'event_link': event_link,
+        'fights': fights
     }
 
     store_past_events(entry)
