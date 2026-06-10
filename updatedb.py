@@ -35,6 +35,33 @@ upcomingevents_collection = db['upcomingevents']
 pastevents_collection = db['pastevents']
 fighterlogs_collection = db['fighterlogs']
 
+def _event_identity(event):
+    event_link = event.get('event_link', '')
+    if event_link:
+        return {"event_link": event_link}
+
+    return {"event_name": event['event_name'], "event_date": event['event_date']}
+
+
+def prune_upcoming_events(events):
+    identities = [_event_identity(event) for event in events]
+    if not identities:
+        print('No upcoming events scraped; skipping prune to avoid deleting valid data.')
+        return
+
+    result = upcomingevents_collection.delete_many({"$nor": identities})
+    print(f"Removed stale upcoming events: {result.deleted_count}")
+
+
+def prune_past_events(events):
+    identities = [_event_identity(event) for event in events]
+    if not identities:
+        print('No past events scraped; skipping prune to avoid deleting valid data.')
+        return
+
+    result = pastevents_collection.delete_many({"$nor": identities})
+    print(f"Removed stale past events: {result.deleted_count}")
+
 def store_ranking(category, champion, fighters, gender):
     rankings_collection.update_one(
     {"category": category, "gender": gender},
@@ -52,7 +79,7 @@ def store_ranking(category, champion, fighters, gender):
 def store_upcoming_events(event):
 
     upcomingevents_collection.update_one(
-    {"event_name": event['event_name'], "event_date": event['event_date']},
+    _event_identity(event),
     {"$set": {
         "event_name": event['event_name'],
         "event_date": event['event_date'],
@@ -67,7 +94,7 @@ def store_upcoming_events(event):
     
 def store_past_events(event):
     pastevents_collection.update_one(
-    {"event_name": event['event_name'], "event_date": event['event_date']},
+    _event_identity(event),
     {"$set": {
         "event_name": event['event_name'],
         "event_date": event['event_date'],
@@ -112,8 +139,8 @@ def store_fighter(fighter):
 
 
 def run_all():
-    # import fighter_profile
-    # fighter_profile.scrape_fighters()
+    import fighter_profile
+    fighter_profile.scrape_fighters()
     import rankings
     import upcoming_events
     import past_events

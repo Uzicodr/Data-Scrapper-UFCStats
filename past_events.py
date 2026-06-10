@@ -1,6 +1,6 @@
 from bs4 import BeautifulSoup
 from fight_details import fetch_event_fights
-from updatedb import store_past_events
+from updatedb import prune_past_events, store_past_events
 from ufcstats_client import fetch_ufcstats_page
 
 html = fetch_ufcstats_page('http://ufcstats.com/statistics/events/completed?page=all')
@@ -8,6 +8,7 @@ soup = BeautifulSoup(html, 'lxml')
 
 rows = soup.find_all('tr', class_='b-statistics__table-row')
 updated_count = 0
+scraped_events = []
 
 for row in rows:
     content = row.find('i', class_='b-statistics__table-content')
@@ -37,6 +38,8 @@ for row in rows:
     }
 
     store_past_events(entry)
+    scraped_events.append(entry)
     updated_count += 1
 
+prune_past_events(scraped_events)
 print(f"Past events updated: {updated_count}")
