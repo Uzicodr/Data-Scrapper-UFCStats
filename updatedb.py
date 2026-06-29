@@ -5,7 +5,7 @@ except ImportError as e:
 import os
 import datetime
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 def get_mongodb_uri():
     uri = os.getenv("MONGODB_CONNECTION_STRING") or os.getenv("MONGODB_URI")
