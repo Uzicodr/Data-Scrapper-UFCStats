@@ -50,3 +50,6 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local data dumps
+data/
