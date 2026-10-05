@@ -192,8 +192,24 @@ Dockerfile
      `venue` and fighter `country` are empty.
    - Removed MongoDB: the legacy scraper scripts, `pymongo`, the Mongo credentials and the daily
      scraper GitHub workflow. Kept `ufcstats_client.py` (proof-of-work solver) for the fetch layer.
-2. **Infrastructure.** LLM wrapper with fallback, grounded search, fetch layer, and the
-   `agent_runs` / `agent_steps` / `review_queue` migration in the backend.
+2. **Infrastructure. Done (pending the backend migration deploy).**
+   - `ufc_agent/llm/client.py`: OpenAI-compatible client over a provider chain set by `LLM_CHAIN`
+     (default `gemini:gemini-2.5-flash`, then `openrouter:nvidia/nemotron-3-super-120b-a12b:free`),
+     with a per-provider requests-per-minute limiter and a 60 s cooldown after a 429.
+   - `ufc_agent/search/grounded.py`: Gemini Grounding with Google Search; returns an answer plus
+     resolved source URLs.
+   - `ufc_agent/fetch/`: domain allowlist, 2 s per-host throttle, retries honoring `Retry-After`,
+     6-hour disk cache, request budget, ufcstats proof-of-work solver, HTML-to-text with tables kept
+     as `a | b | c` rows.
+   - `ufc_agent/runlog.py`: writes `agent_runs`, `agent_steps` and `review_queue`.
+   - Backend migration `V3__agent_runs.sql` adds those three tables. Flyway applies it on the next
+     backend start or deploy.
+   - Live checks passed: ufcstats page fetch (challenge solved), grounded search, both LLM providers,
+     Gemini tool calling.
+   - Findings for phase 3: grounded search answers headline facts (main event, date, winner) but not
+     full fight cards, so card and stats work must fetch pages (ufc.com, ufcstats.com). The
+     ufcstats "completed" list shows the next upcoming event as its first row; skip events dated in
+     the future.
 3. **First agent: `post_event_stats`.** Chosen first because the seeded data is ground truth for it.
    Build an eval on 30 past events. Measure field accuracy and invented-data rate. Tune prompts until
    results are at least 98% correct.
