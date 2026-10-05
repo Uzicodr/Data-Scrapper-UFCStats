@@ -1,4 +1,5 @@
 """Records agent runs, steps and review items in the agent_runs / agent_steps / review_queue tables."""
+import json
 import uuid
 
 from psycopg.types.json import Jsonb
@@ -11,10 +12,14 @@ def _json(value):
         return None
     if isinstance(value, str):
         value = {"text": value}
-    text = str(value)
+    # Serialize to JSON first to handle non-serializable types like UUID
+    try:
+        text = json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
     if len(text) > MAX_RESULT_CHARS:
         return Jsonb({"truncated": True, "preview": text[:MAX_RESULT_CHARS]})
-    return Jsonb(value)
+    return Jsonb(json.loads(text))
 
 
 class RunLog:
