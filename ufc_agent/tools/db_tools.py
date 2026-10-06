@@ -19,7 +19,9 @@ from ufc_agent.normalize import (
     to_float,
     ufcstats_id,
 )
-from ufc_agent.schemas.models import EventCard, EventResults, FighterProfile, Rankings
+from ufc_agent.schemas.models import (
+    NO_WINNER, EventCard, EventResults, FighterProfile, LiveResult, Rankings, ufcstats_method,
+)
 
 UFCSTATS = "http://ufcstats.com"
 
@@ -60,9 +62,12 @@ class NameIndex:
         return None
 
     def name_matches(self, fighter_id: str, name: str, threshold: float = 0.6) -> bool:
-        """True when fighter_id exists and one of its names is close to name."""
+        """True when fighter_id exists and one of its names is close to name, or has the same words in any
+        order ('Wang Cong' and 'Cong Wang')."""
         key = name_key(name)
-        return any(SequenceMatcher(None, key, known).ratio() >= threshold for known in self.names.get(fighter_id, ()))
+        tokens = sorted(key.split())
+        return any(SequenceMatcher(None, key, known).ratio() >= threshold or sorted(known.split()) == tokens
+                   for known in self.names.get(fighter_id, ()))
 
 
 class DBTools:
@@ -563,6 +568,7 @@ class DBTools:
                     "method_details": clean(fight.method_details) or "",
                     "sources": results.sources,
                     "completed_by": "post_event_stats",
+                    "result_status": "verified",
                 }
                 values = (red_id, blue_id, winner_id, clean(fight.weight_class), order, fight.is_title_fight,
                           fight.method, fight.round, fight.time.strip())
@@ -630,3 +636,121 @@ class DBTools:
             "new_fighters": new_fighters,
             "cancelled_bouts": cancelled,
         }
+
+    # ------------------------------------------------------------------
+    # Live results (live_event)
+    # ------------------------------------------------------------------
+    def live_bouts(self, event_id: str) -> list[dict]:
+        """The event's bouts with fighter ids and names, as the live watcher tracks them."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT x.id, x.status, x.red_fighter_id, x.blue_fighter_id, r.name AS red, b.name AS blue, "
+            "x.raw_payload->>'result_status' AS result_status FROM fights x "
+            "LEFT JOIN fighters r ON r.id = x.red_fighter_id LEFT JOIN fighters b ON b.id = x.blue_fighter_id "
+            "WHERE x.event_id = %s ORDER BY x.bout_order NULLS LAST",
+            (event_id,),
+        ).fetchall()]
+
+    def set_event_live(self, event_id: str) -> None:
+        if self.dry_run:
+            return
+        self.conn.execute(
+            "UPDATE events SET status = 'live', updated_at = NOW() WHERE id = %s AND status = 'scheduled' "
+            "AND NOT manual_override",
+            (event_id,),
+        )
+        self.conn.commit()
+
+    def submit_live_result(self, result: LiveResult) -> dict:
+        """Record one finished bout from a live source as a provisional result.
+
+        The bout must match exactly one scheduled bout of the event by both fighters' names, in either
+        order. post_event_stats later overwrites it with ufcstats' verified result and stats.
+        """
+        try:
+            event = self.conn.execute(
+                "SELECT id, name, status, manual_override FROM events WHERE id = %s", (result.event_id,)
+            ).fetchone()
+        except psycopg.errors.InvalidTextRepresentation:
+            self.conn.rollback()
+            event = None
+        if event is None:
+            return {"status": "error", "message": f"Unknown event_id {result.event_id}"}
+        if event["manual_override"] or event["status"] not in ("scheduled", "live"):
+            self.conn.rollback()
+            return {"status": "error", "message": f"{event['name']} is {event['status']}; live results are closed"}
+
+        index = self.name_index()
+        bouts = [b for b in self.live_bouts(result.event_id) if b["red_fighter_id"] and b["blue_fighter_id"]]
+
+        def same_bout(bout):
+            red, blue = str(bout["red_fighter_id"]), str(bout["blue_fighter_id"])
+            return ((index.name_matches(red, result.red_name) and index.name_matches(blue, result.blue_name))
+                    or (index.name_matches(red, result.blue_name) and index.name_matches(blue, result.red_name)))
+
+        matches = [b for b in bouts if same_bout(b)]
+        label = f"{result.red_name} vs {result.blue_name}"
+        if len(matches) != 1:
+            self.conn.rollback()
+            pending = [f"{b['red']} vs {b['blue']}" for b in bouts if b["status"] == "scheduled"]
+            return {"status": "error",
+                    "message": f"{label}: {'no' if not matches else 'more than one'} bout matches",
+                    "scheduled_bouts": pending}
+        bout = matches[0]
+        if bout["status"] == "completed" and bout["result_status"] == "verified":
+            self.conn.rollback()
+            return {"status": "ok", "message": f"{label}: already verified, left unchanged"}
+        if bout["status"] == "cancelled":
+            self.conn.rollback()
+            return {"status": "error", "message": f"{label}: bout is cancelled"}
+
+        winner_id = None
+        if name_key(result.winner) not in NO_WINNER:
+            winner_id = next((str(bout[f"{c}_fighter_id"]) for c in ("red", "blue")
+                              if index.name_matches(str(bout[f"{c}_fighter_id"]), result.winner)), None)
+        payload = {
+            "result_status": "provisional",
+            "result_source": result.source_url,
+            "live_result": {"red": result.red_name, "blue": result.blue_name, "winner": result.winner,
+                            "method": result.method, "round": result.round, "time": result.time.strip()},
+        }
+        method = ufcstats_method(result.method)
+        try:
+            self.conn.execute(
+                "UPDATE fights SET status = 'completed', winner_fighter_id = %s, method = %s, result_round = %s, "
+                "result_time = %s, raw_payload = COALESCE(raw_payload, '{}'::jsonb) || %s, updated_at = NOW() "
+                "WHERE id = %s",
+                (winner_id, method, result.round, result.time.strip(), Jsonb(payload), bout["id"]),
+            )
+            if self.dry_run:
+                self.conn.rollback()
+                self.recorded.append({"live_result": {"fight_id": str(bout["id"]), "bout": f"{bout['red']} vs {bout['blue']}",
+                                                      "winner_fighter_id": winner_id, "method": method,
+                                                      "round": result.round, "time": result.time.strip()}})
+            else:
+                self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            return {"status": "error", "message": str(e)}
+        winner = "no winner" if winner_id is None else result.winner
+        return {"status": "ok", "message": f"{label}: {winner}, {method} round {result.round} {result.time.strip()}"
+                                           + (" (dry run)" if self.dry_run else "")}
+
+    def live_candidates(self) -> list[dict]:
+        """ufcstats events scheduled or live whose date is yesterday, today or tomorrow (UTC)."""
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id, name, slug, status, starts_at FROM events WHERE source = %s AND status IN ('scheduled', 'live') "
+            "AND NOT manual_override AND starts_at::date BETWEEN CURRENT_DATE - 1 AND CURRENT_DATE + 1 "
+            "ORDER BY starts_at",
+            (SOURCE,),
+        ).fetchall()]
+
+    def set_event_start(self, event_id: str, starts_at) -> None:
+        """Store the real start time read from ufc.com, so picks lock when the card actually begins."""
+        if self.dry_run:
+            return
+        self.conn.execute(
+            "UPDATE events SET starts_at = %s, updated_at = NOW() WHERE id = %s AND NOT manual_override "
+            "AND starts_at IS DISTINCT FROM %s",
+            (starts_at, event_id, starts_at),
+        )
+        self.conn.commit()

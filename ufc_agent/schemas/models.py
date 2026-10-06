@@ -247,3 +247,52 @@ class EventResults(BaseModel):
         if errors:
             raise ValueError("; ".join(errors))
         return self
+
+
+# ---------------------------------------------------------------------------
+# Live results (live_event)
+# ---------------------------------------------------------------------------
+# ufc.com method text -> ufcstats method code. Matched by prefix, case-insensitive.
+UFC_COM_METHODS = (
+    ("decision - unanimous", "U-DEC"), ("decision - split", "S-DEC"), ("decision - majority", "M-DEC"),
+    ("ko/tko", "KO/TKO"), ("tko", "KO/TKO"), ("ko", "KO/TKO"), ("submission", "SUB"),
+    ("dq", "DQ"), ("disqualification", "DQ"), ("could not continue", "CNC"),
+    ("no contest", "Overturned"), ("overturned", "Overturned"),
+)
+NO_WINNER = ("draw", "no contest")
+
+
+def ufcstats_method(text):
+    """'Decision - Unanimous' -> 'U-DEC'; unknown text -> 'Other'."""
+    lowered = (text or "").strip().lower()
+    for prefix, code in UFC_COM_METHODS:
+        if lowered.startswith(prefix):
+            return code
+    return "Other"
+
+
+class LiveResult(BaseModel):
+    """One finished bout as a live source reports it. Provisional until post_event_stats verifies it."""
+    event_id: str
+    red_name: str = Field(min_length=1, description="First fighter as the source lists the bout")
+    blue_name: str = Field(min_length=1, description="Second fighter as the source lists the bout")
+    winner: str = Field(min_length=1, description="Winner's name, or 'draw' or 'no contest'")
+    method: str = Field(min_length=1, description="Method as the source prints it")
+    round: int = Field(ge=1, le=5)
+    time: str
+    source_url: str
+
+    @model_validator(mode="after")
+    def check_result(self):
+        errors = []
+        match = TIME_RE.match(self.time.strip())
+        if not match or int(match.group(1)) * 60 + int(match.group(2)) > 300:
+            errors.append(f"time {self.time!r} must be m:ss, at most 5:00")
+        if not self.source_url.startswith(("http://", "https://")):
+            errors.append(f"source_url {self.source_url!r} must be a URL")
+        winner = name_key(self.winner)
+        if winner not in NO_WINNER and winner not in (name_key(self.red_name), name_key(self.blue_name)):
+            errors.append(f"winner {self.winner!r} must be one of the two fighters, 'draw' or 'no contest'")
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self

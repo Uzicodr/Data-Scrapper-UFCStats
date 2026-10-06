@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from ufc_agent.fetch.http import Fetcher
 from ufc_agent.schemas.models import (
-    DIVISIONS, METHODS, RANKED_PER_DIVISION, EventCard, EventResults, FighterProfile, Rankings,
+    DIVISIONS, METHODS, RANKED_PER_DIVISION, EventCard, EventResults, FighterProfile, LiveResult, Rankings,
 )
 from ufc_agent.search.grounded import GroundedSearch
 from ufc_agent.tools.db_tools import DBTools
@@ -44,6 +44,7 @@ class ToolRegistry:
             "db_list_upcoming": self._db_list_upcoming,
             "db_find_fighter": self._db_find_fighter,
             "submit_event_results": self._submit_event_results,
+            "submit_live_result": self._submit_live_result,
             "submit_rankings": self._submit_rankings,
             "submit_event_card": self._submit_event_card,
             "submit_fighter_profile": self._submit_fighter_profile,
@@ -70,6 +71,16 @@ class ToolRegistry:
                 "db_list_upcoming",
                 "db_find_fighter",
                 "submit_event_card",
+                "flag_issue",
+            ],
+            "live_event": [
+                "submit_live_result",
+                "flag_issue",
+            ],
+            # When the live page cannot be fetched: search instead.
+            "live_event_search": [
+                "web_search",
+                "submit_live_result",
                 "flag_issue",
             ],
             "refresh_fighters": [
@@ -145,6 +156,14 @@ class ToolRegistry:
         except ValidationError as e:
             return validation_error(e)
         return self.db_tools.submit_event_results(event_results)
+
+    def _submit_live_result(self, **result) -> dict:
+        """Validate one finished bout from a live source, then record it as provisional."""
+        try:
+            live_result = LiveResult(**result)
+        except ValidationError as e:
+            return validation_error(e)
+        return self.db_tools.submit_live_result(live_result)
 
     def _submit_event_card(self, **card) -> dict:
         """Validate a full upcoming card, then create or update the event and its bouts."""
@@ -313,6 +332,28 @@ class ToolRegistry:
                                     "description": "URLs the results were read from"},
                     },
                     "required": ["event_url", "fights", "sources"],
+                },
+            },
+            "submit_live_result": {
+                "name": "submit_live_result",
+                "description": "Record one finished bout as a provisional result. The bout is matched to a "
+                               "scheduled bout of the event by both fighters' names.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {"type": "string", "description": "event_id from the job input"},
+                        "red_name": {"type": "string", "description": "First fighter as the source lists the bout"},
+                        "blue_name": {"type": "string", "description": "Second fighter as the source lists the bout"},
+                        "winner": {"type": "string",
+                                   "description": "Winner's name exactly as given for that fighter, or 'draw' "
+                                                  "or 'no contest'"},
+                        "method": {"type": "string", "description": "Method as printed, e.g. 'Decision - Unanimous'"},
+                        "round": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "time": {"type": "string", "description": "m:ss as printed"},
+                        "source_url": {"type": "string", "description": "URL the result was read from"},
+                    },
+                    "required": ["event_id", "red_name", "blue_name", "winner", "method", "round", "time",
+                                 "source_url"],
                 },
             },
             "submit_event_card": {

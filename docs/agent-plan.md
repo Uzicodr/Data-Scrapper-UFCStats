@@ -49,9 +49,7 @@ Where search works and where it does not:
 | Page fetch | `httpx` with a per-host throttle (2 s minimum), retries with backoff, a URL cache, the existing ufcstats proof-of-work solver, `trafilatura`/`selectolax` to turn HTML into compact text, and a domain allowlist. |
 | Validation | Pydantic v2 |
 | Database | Supabase Postgres via `psycopg` 3. Schema is owned by the backend's Flyway migrations. |
-| API | FastAPI |
-| Scheduler | APScheduler inside the service. Live polling needs an always-on process. |
-| Deploy | Docker on an always-on host (to be decided). GitHub Actions cannot poll every 2 minutes reliably. |
+| Scheduler | GitHub Actions scheduled workflows (`.github/workflows/`). No API or server in this repo: the Spring Boot backend is the API. |
 
 ### Free-tier constraints
 
@@ -148,14 +146,19 @@ Conventions, matching the existing Cito sync:
 
 ## 9. Java integration
 
-- Java keeps reading data directly from Supabase.
-- The Python service exposes:
-  - `POST /jobs/{job}`: start a job, returns a `run_id`
-  - `GET /runs/{id}`: run status and summary
-  - `POST /ask`: ad-hoc question
-  - `GET /health`
-- All endpoints require an API key header.
-- For live updates, Java either polls `events` and `fights`, or subscribes to Supabase Realtime on `fights`.
+There is no API in this repo. The jobs write straight to the Supabase tables the Spring Boot backend
+already maps (`fighters`, `events`, `fights`, `rankings`), so its endpoints serve new data as soon as a
+job commits; there is no cache in between.
+
+- Status values match what `EventController` queries: `scheduled`, `live`, `completed`. Bouts that do
+  not happen are `cancelled`.
+- Per-fight stats and career stats are in `raw_payload`; `FightDto` and `FighterDto` do not expose them
+  yet.
+- `events.starts_at` holds the real start time once the live check has read it from ufc.com, so pick
+  locking (`PickService`) uses the actual start.
+- Pick settlement does not happen yet: `SettlementService` only runs inside the Java Cito sync.
+- Disable the backend's Cito sync workflow (`sync.yml`) while ufcstats is the source, or it adds
+  `source = 'cito'` duplicates of the same events and fighters.
 
 ## 10. Project layout (this repo)
 
@@ -170,14 +173,13 @@ ufc_agent/
   tools/                 tool implementations and registry
   agents/                loop, prompts, one module per job
   schemas/               Pydantic models (tool contracts)
-  api/                   FastAPI server
   scheduler.py
 scripts/
   mongo_json_to_sql.py   one-off Mongo export to SQL seed (done)
 evals/                   eval set built from seeded data, runner, reports
 tests/                   unit tests per tool, saved fixtures
 docs/                    this plan
-Dockerfile
+.github/workflows/       scheduled jobs (see phase 6)
 ```
 
 ## 11. Phases
@@ -210,7 +212,7 @@ Dockerfile
      full fight cards, so card and stats work must fetch pages (ufc.com, ufcstats.com). The
      ufcstats "completed" list shows the next upcoming event as its first row; skip events dated in
      the future.
-3. **`post_event_stats` and eval. Built; eval blocked on daily LLM quota.**
+3. **`post_event_stats` and eval. Done.**
    - The agent reads the completed event page once (`fetch_page(include_links=true)`) and calls
      `submit_event_results` with every fight: outcome, method, round, time, title fight, and each
      fighter's KD, Str, Td and Sub. Fighters are matched by URL, not corner (ufcstats lists the winner
@@ -221,11 +223,13 @@ Dockerfile
    - Eval: `python -m evals.eval_runner [--events 30] [--skip N]`. Uses `DBTools(dry_run=True)`: every
      check and write runs, then rolls back, so the seeded ground truth is never changed (verified by
      table checksums before and after). Scores 13 fields per fight against the seeded data.
-   - First full run: the 6 events that reached a model scored 975/975 fields (100%), 0 invented
-     fights. The other 24 got no model: both free tiers hit their **daily** caps (Gemini
-     `gemini-2.5-flash` 20 requests/day; OpenRouter free models 50/day without credits).
-   - Remaining: finish the eval (`--skip 6`) once quota resets, then run the job for real on the past
-     events still marked `scheduled` (Aug 29 to Oct 3).
+   - Eval passed: 30 events, 377 fights, 4,893 of 4,893 fields correct (100%), no missing or invented
+     fights (`evals/results/eval_20261006_194907.json` for the first 6 events,
+     `eval_20261007_001128.json` for the other 24). The first attempt stopped after 6 events when the
+     Gemini and OpenRouter daily caps ran out; the rest ran with OpenCode `space-bunny-free` first.
+   - Production run completed the 6 past events that were still scheduled (Aug 29 to Oct 3): 78 fights
+     completed and verified, 3 bouts that did not happen marked cancelled, 5 debuting fighters created as
+     stubs for `refresh_fighters`.
 4. **More agents. Done.**
    - `sync_rankings` (`python -m ufc_agent.agents.sync_rankings`): reads ufc.com/rankings and replaces
      each division's rows. Live run saved all 13 divisions; every linked fighter appears on the page.
@@ -246,9 +250,52 @@ Dockerfile
    - Known cost: `sync_upcoming` sends about 600k input tokens per run because every fetched event
      page stays in the conversation. If free-tier token limits bite, run one short conversation per
      event, as `refresh_fighters` does with batches.
-5. **`live_event`.** Run on a real event night in shadow mode, writing to a staging schema, before
-   going live.
-6. **Service.** FastAPI, scheduler, Docker deploy.
+5. **`live_event`. Built; first real run pending an event night.**
+   - Source: the ufc.com event page (`https://www.ufc.com/event/<event slug>`), which posts each result
+     as it happens; ufcstats only updates after the event. `ufc_agent/fetch/ufc_card.py` reads the
+     fight listing markup into one line per bout ("A [Loss] vs B [Win] | KO/TKO | round 1 | 2:09"),
+     because the flattened page text separates the Win/Loss labels from the fighters.
+   - The watcher is code: it polls every 2 minutes and hashes that digest (odds and timers do not
+     change it). The agent runs only when the hash changes, with the finished bouts and the bouts the
+     database still has scheduled, and calls `submit_live_result` per bout. About one LLM call per
+     posted result instead of ~360 per event.
+   - Results are saved as provisional (`raw_payload.result_status = 'provisional'`, method mapped to
+     the ufcstats codes, event status `live`). `post_event_stats` overwrites them the next day and sets
+     `result_status = 'verified'`.
+   - After 3 failed fetches in a row it falls back to grounded search, at most every 10 minutes. An
+     exhausted LLM quota pauses processing; the same page is retried on the next poll.
+   - Run: `python -m ufc_agent.agents.live_event --event-id <uuid> [--url ...] [--shadow]`.
+     `--shadow` saves nothing and writes what it would have saved to `data/live_shadow/*.jsonl`;
+     `--html-file page.html` replays a saved page.
+   - Shadow replay of UFC 332 against the real database: 7 of 7 scheduled bouts matched, all winners,
+     methods, rounds and times correct, table checksums unchanged.
+   - Remaining: shadow-run a real event night (next: UFC Fight Night: Allen vs. Duncan, Oct 10), then
+     run without `--shadow`. Starting the watcher at the event's start time is phase 6's scheduler.
+   - Local network note: this machine's router DNS fails to resolve `www.ufc.com` (public DNS
+     resolves it). Fix the DNS setting, or the live job and `sync_rankings` cannot reach ufc.com.
+6. **Scheduling on GitHub Actions. Done (needs repository secrets).**
+   - `_run-job.yml` is the shared setup (Python 3.12, `pip install -r requirements.txt`, secrets); each
+     job is a small scheduled workflow that calls it, and every one can also be started by hand.
+
+     | Workflow | Schedule (UTC) | Command |
+     |---|---|---|
+     | `sync-upcoming.yml` | daily 14:00 | `ufc_agent.agents.sync_upcoming` |
+     | `sync-rankings.yml` | Wednesday 15:00 | `ufc_agent.agents.sync_rankings` |
+     | `post-event-stats.yml` | 04:00, 10:00, 16:00, 22:00 | `ufc_agent.agents.post_event_stats` |
+     | `refresh-fighters.yml` | daily 11:30 | `ufc_agent.agents.refresh_fighters` |
+     | `live-event.yml` | hourly at :05 | `ufc_agent.agents.live_event --auto --max-hours 5.8` |
+
+   - Live: `--auto` reads each nearby event's real start from ufc.com
+     (`.c-event-fight-card-broadcaster__time[data-timestamp]`), stores it in `events.starts_at`, and
+     watches the event whose window (15 minutes before its first section to 10 hours after) contains
+     now. Each run stays under GitHub's 6-hour job limit; a concurrency group keeps one watcher at a
+     time, and the next hourly run continues a long card. Manual runs can choose shadow mode, whose
+     output is uploaded as an artifact.
+   - Required repository secrets: `SUPABASE_DB_URL`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
+     `OPENCODE_API_KEY`; repository variable `LLM_CHAIN`.
+   - Limits: scheduled runs can start 5 to 30 minutes late; scheduled workflows are disabled after 60
+     days without a commit; a private repository gets 2,000 free minutes a month (this setup uses
+     roughly 900 to 1,200; public repositories are free).
 
 ## 12. Daily LLM budget
 
@@ -258,6 +305,11 @@ The free tiers allow about 70 LLM calls a day in total, and one day of jobs need
 OpenRouter raises its free-model cap to 1,000 requests a day, which covers everything. The client
 benches a provider until the reset time a 429 names, waits out short cooldowns, and raises
 `QuotaExhausted` when every provider is out for longer than 2 minutes.
+
+The chain now starts with OpenCode Zen (`LLM_CHAIN=opencode:space-bunny-free,gemini:...,openrouter:...`).
+OpenCode's free models refuse API use outside the OpenCode app ("OpenCode's free tier can only be used
+from within OpenCode"); `space-bunny-free` answered anyway when this was set up. Treat it as likely
+against their terms and liable to stop working without notice.
 
 ## 13. Risks
 
@@ -272,6 +324,5 @@ benches a provider until the reset time a 429 names, waits out short cooldowns, 
 
 ## 14. Open decisions
 
-1. Hosting for the always-on Python service (small VM, Render, Fly.io or Railway).
 2. How pick settlement is triggered when the agent completes a fight.
 3. Whether Cito stays as a source, and if so, which source wins per table.
