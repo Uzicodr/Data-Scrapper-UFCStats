@@ -160,8 +160,8 @@ class Fetcher:
         self._write_cache(url, html)
         return html
 
-    def fetch(self, url, max_chars=8000):
+    def fetch(self, url, max_chars=8000, include_links=False):
         """Fetch page and extract clean text. Returns (title, text, truncated)."""
         from ufc_agent.fetch.extract import html_to_text
         html = self.get(url)
-        return html_to_text(html, max_chars=max_chars)
+        return html_to_text(html, max_chars=max_chars, include_links=include_links, base_url=url)

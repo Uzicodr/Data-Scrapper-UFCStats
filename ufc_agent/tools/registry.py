@@ -2,9 +2,20 @@
 import json
 from typing import Callable, Optional
 
+from pydantic import ValidationError
+
 from ufc_agent.fetch.http import Fetcher
+from ufc_agent.schemas.models import DIVISIONS, RANKED_PER_DIVISION, EventCard, FighterProfile, Rankings
 from ufc_agent.search.grounded import GroundedSearch
 from ufc_agent.tools.db_tools import DBTools
+
+PAGE_CHARS = 8000
+
+
+def validation_error(e: ValidationError) -> dict:
+    """Tool result for a pydantic failure, one readable line per problem."""
+    return {"status": "error", "message": "Validation failed",
+            "errors": [" ".join([".".join(map(str, err["loc"])), err["msg"]]).strip() for err in e.errors()]}
 
 
 class ToolResult:
@@ -28,9 +39,13 @@ class ToolRegistry:
             "web_search": self._web_search,
             "fetch_page": self._fetch_page,
             "db_get_event": self._db_get_event,
+            "db_list_upcoming": self._db_list_upcoming,
             "db_find_fighter": self._db_find_fighter,
             "submit_fight_result": self._submit_fight_result,
             "submit_fight_stats": self._submit_fight_stats,
+            "submit_rankings": self._submit_rankings,
+            "submit_event_card": self._submit_event_card,
+            "submit_fighter_profile": self._submit_fighter_profile,
             "flag_issue": self._flag_issue,
         }
 
@@ -43,6 +58,25 @@ class ToolRegistry:
                 "db_find_fighter",
                 "submit_fight_result",
                 "submit_fight_stats",
+                "flag_issue",
+            ],
+            "sync_rankings": [
+                "fetch_page",
+                "web_search",
+                "db_find_fighter",
+                "submit_rankings",
+                "flag_issue",
+            ],
+            "sync_upcoming": [
+                "fetch_page",
+                "db_list_upcoming",
+                "db_find_fighter",
+                "submit_event_card",
+                "flag_issue",
+            ],
+            "refresh_fighters": [
+                "fetch_page",
+                "submit_fighter_profile",
                 "flag_issue",
             ],
         }
@@ -66,15 +100,18 @@ class ToolRegistry:
         result = self.search.search(query)
         return result.to_dict()
 
-    def _fetch_page(self, url: str) -> dict:
-        """Fetch and clean page. Returns title, text, truncated flag."""
-        title, text, truncated = self.fetcher.fetch(url)
-        return {
+    def _fetch_page(self, url: str, start: int = 0, include_links: bool = False) -> dict:
+        """Fetch and clean page. Returns one PAGE_CHARS chunk from start, plus next_start when more text follows."""
+        title, text, truncated = self.fetcher.fetch(url, max_chars=start + PAGE_CHARS, include_links=include_links)
+        result = {
             "title": title or "",
-            "text": text,
+            "text": text[start:],
             "truncated": truncated,
             "url": url,
         }
+        if truncated:
+            result["next_start"] = len(text)
+        return result
 
     def _db_get_event(self, name_or_date: str) -> dict:
         """Look up event by name or date (YYYY-MM-DD)."""
@@ -82,6 +119,10 @@ class ToolRegistry:
         if not event:
             return {"event": None, "error": f"Event not found: {name_or_date}"}
         return {"event": event}
+
+    def _db_list_upcoming(self, days: int = 180) -> dict:
+        """Scheduled events in the next N days, with their scheduled bouts."""
+        return {"events": self.db_tools.upcoming_cards(days)}
 
     def _db_find_fighter(self, name: str) -> dict:
         """Fuzzy match fighter. Returns candidates with scores."""
@@ -100,12 +141,50 @@ class ToolRegistry:
         """Submit per-fight stats. Expects LLM to provide stats dict."""
         return {"status": "pending", "message": "submit_fight_stats: define full schema"}
 
+    def _submit_rankings(self, division: str, ranked: list[dict], sources: list[str],
+                         champion: Optional[dict] = None) -> dict:
+        """Validate a full division list, then replace that division's rows."""
+        try:
+            rankings = Rankings(division=division, champion=champion, ranked=ranked, sources=sources)
+        except ValidationError as e:
+            return validation_error(e)
+        return self.db_tools.submit_rankings(rankings)
+
+    def _submit_event_card(self, **card) -> dict:
+        """Validate a full upcoming card, then create or update the event and its bouts."""
+        try:
+            event_card = EventCard(**card)
+        except ValidationError as e:
+            return validation_error(e)
+        return self.db_tools.submit_event_card(event_card)
+
+    def _submit_fighter_profile(self, **profile) -> dict:
+        """Validate a fighter's profile as printed on ufcstats.com, then update the fighter."""
+        try:
+            fighter_profile = FighterProfile(**profile)
+        except ValidationError as e:
+            return validation_error(e)
+        return self.db_tools.submit_fighter_profile(fighter_profile)
+
     def _flag_issue(self, entity: str, reason: str) -> dict:
         """Flag issue for human review."""
         return self.db_tools.flag_issue(entity, reason)
 
     def _schema(self, name: str) -> dict:
         """Return OpenAI tool schema for a tool."""
+        function = self._function_schema(name)
+        return {"type": "function", "function": function} if function else {}
+
+    def _function_schema(self, name: str) -> dict:
+        ranked_fighter = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name exactly as printed by the source"},
+                "fighter_id": {"type": "string",
+                               "description": "Only when the tool could not match the name: id from db_find_fighter"},
+            },
+            "required": ["name"],
+        }
         schemas = {
             "web_search": {
                 "name": "web_search",
@@ -120,13 +199,29 @@ class ToolRegistry:
             },
             "fetch_page": {
                 "name": "fetch_page",
-                "description": "Fetch and clean a page. Allowed: ufcstats.com, ufc.com, espn.com, etc.",
+                "description": "Fetch and clean a page. Allowed: ufcstats.com, ufc.com, espn.com, etc. "
+                               "Long pages come in chunks: call again with start=next_start for the rest.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string", "description": "Page URL"}
+                        "url": {"type": "string", "description": "Page URL"},
+                        "start": {"type": "integer", "minimum": 0,
+                                  "description": "Character offset; use next_start from the previous chunk"},
+                        "include_links": {"type": "boolean",
+                                          "description": "Show links as 'text <url>', table-row links as a "
+                                                         "trailing <url>, and images as [img:file.png]"}
                     },
                     "required": ["url"]
+                }
+            },
+            "db_list_upcoming": {
+                "name": "db_list_upcoming",
+                "description": "List scheduled events already in the database for the next N days, with their bouts",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer", "minimum": 1, "description": "Look-ahead window, default 180"}
+                    }
                 }
             },
             "db_get_event": {
@@ -191,6 +286,91 @@ class ToolRegistry:
                     },
                     "required": ["fighter_name", "event_name", "stats", "source"]
                 }
+            },
+            "submit_rankings": {
+                "name": "submit_rankings",
+                "description": "Replace one division's rankings with the full current list. "
+                               "Names are matched to fighters automatically; unmatched names come back as errors.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "division": {"type": "string", "enum": list(DIVISIONS)},
+                        "champion": {**ranked_fighter,
+                                     "description": "Division champion. Omit for pound-for-pound or a vacant title."},
+                        "ranked": {"type": "array", "items": ranked_fighter,
+                                   "minItems": RANKED_PER_DIVISION, "maxItems": RANKED_PER_DIVISION,
+                                   "description": "Ranked fighters in order; first item is rank 1"},
+                        "sources": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "description": "URLs the list was read from"}
+                    },
+                    "required": ["division", "ranked", "sources"]
+                }
+            },
+            "submit_event_card": {
+                "name": "submit_event_card",
+                "description": "Create or update one upcoming event with its full card. Bouts missing from the "
+                               "card are marked cancelled. Fighters new to the database are created from their URL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_url": {"type": "string", "description": "ufcstats.com/event-details/... URL"},
+                        "name": {"type": "string", "description": "Event name exactly as printed"},
+                        "date": {"type": "string", "description": "Event date as YYYY-MM-DD"},
+                        "location": {"type": "string",
+                                     "description": "Location as printed, e.g. 'Las Vegas, Nevada, USA'"},
+                        "bouts": {
+                            "type": "array", "minItems": 1,
+                            "description": "Every bout in page order; the first bout is the main event",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "red_name": {"type": "string", "description": "First fighter listed in the row"},
+                                    "red_url": {"type": "string", "description": "First fighter's fighter-details URL"},
+                                    "blue_name": {"type": "string", "description": "Second fighter listed in the row"},
+                                    "blue_url": {"type": "string",
+                                                 "description": "Second fighter's fighter-details URL"},
+                                    "weight_class": {"type": "string", "description": "Weight class as printed"},
+                                    "is_title_fight": {"type": "boolean",
+                                                       "description": "True only when the row shows [img:belt.png]"},
+                                    "fight_url": {"type": "string", "description": "The row's fight-details URL"},
+                                },
+                                "required": ["red_name", "blue_name"],
+                            },
+                        },
+                        "sources": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "description": "URLs the card was read from"},
+                    },
+                    "required": ["event_url", "name", "date", "bouts", "sources"],
+                },
+            },
+            "submit_fighter_profile": {
+                "name": "submit_fighter_profile",
+                "description": "Update one fighter from their ufcstats.com profile. Copy every value exactly as "
+                               "printed, including units and % signs; use '--' when the page shows '--' or nothing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fighter_id": {"type": "string", "description": "fighter_id from the job input"},
+                        "profile_url": {"type": "string", "description": "profile_url from the job input"},
+                        "name_on_page": {"type": "string", "description": "Fighter name at the top of the page"},
+                        "nickname": {"type": "string", "description": "Nickname under the name, if any"},
+                        "record": {"type": "string", "description": "e.g. '27-7-0' or '27-7-0 (1 NC)'"},
+                        "height": {"type": "string", "description": "e.g. 6' 2\""},
+                        "weight": {"type": "string", "description": "e.g. '185 lbs.'"},
+                        "reach": {"type": "string", "description": "e.g. '75\"'"},
+                        "stance": {"type": "string", "description": "e.g. 'Orthodox'"},
+                        "dob": {"type": "string", "description": "e.g. 'Dec 28, 1995'"},
+                        "slpm": {"type": "string", "description": "SLpM, e.g. '3.75'"},
+                        "str_acc": {"type": "string", "description": "Str. Acc., e.g. '52%'"},
+                        "sapm": {"type": "string", "description": "SApM, e.g. '3.78'"},
+                        "str_def": {"type": "string", "description": "Str. Def, e.g. '47%'"},
+                        "td_avg": {"type": "string", "description": "TD Avg., e.g. '1.52'"},
+                        "td_acc": {"type": "string", "description": "TD Acc., e.g. '41%'"},
+                        "td_def": {"type": "string", "description": "TD Def., e.g. '57%'"},
+                        "sub_avg": {"type": "string", "description": "Sub. Avg., e.g. '1.1'"},
+                    },
+                    "required": ["fighter_id", "profile_url", "name_on_page", "record"],
+                },
             },
             "flag_issue": {
                 "name": "flag_issue",

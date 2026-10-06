@@ -53,7 +53,8 @@ class RunLog:
             (
                 uuid.uuid4(), self.run_id, self.step,
                 _json({"fallback_errors": response.errors}) if response.errors else None,
-                _json({"content": response.message.content, "tool_calls": tool_calls}),
+                _json({"content": response.message.content, "tool_calls": tool_calls,
+                       "finish_reason": getattr(response, "finish_reason", None)}),
                 response.provider, response.model, response.input_tokens, response.output_tokens,
                 response.duration_ms,
             ),

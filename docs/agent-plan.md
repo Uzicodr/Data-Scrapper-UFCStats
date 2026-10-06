@@ -213,7 +213,26 @@ Dockerfile
 3. **First agent: `post_event_stats`.** Chosen first because the seeded data is ground truth for it.
    Build an eval on 30 past events. Measure field accuracy and invented-data rate. Tune prompts until
    results are at least 98% correct.
-4. **More agents.** `sync_upcoming`, `sync_rankings`, then `refresh_fighters`.
+4. **More agents. Done.**
+   - `sync_rankings` (`python -m ufc_agent.agents.sync_rankings`): reads ufc.com/rankings and replaces
+     each division's rows. Live run saved all 13 divisions; every linked fighter appears on the page.
+   - `sync_upcoming` (`python -m ufc_agent.agents.sync_upcoming`): reads the ufcstats upcoming list and
+     each event page with `fetch_page(include_links=true)`, then calls `submit_event_card` per event.
+     Bouts are matched by ufcstats fight id; bouts dropped from a card are marked `cancelled`, never
+     deleted, because picks reference them. Fighters new to the database are created as stubs
+     (`raw_payload.stub = true`). Rows with `manual_override` and non-scheduled events are never touched.
+     Live run saved all 8 upcoming cards (82 bouts, correct main events and title fights).
+   - `refresh_fighters` (`python -m ufc_agent.agents.refresh_fighters [--days 14] [--limit 40]
+     [--fighter-id <uuid>]`): targets stubs first, then fighters whose profile is older than a fight
+     they had in the last N days. Works in batches of 5 so each conversation stays short. The model
+     copies values as printed; code parses them and never lets a blank (`--`) erase a stored value.
+     Live run on 6 fighters: all 90 copied values matched the previously scraped data.
+   - Shared fixes made along the way: `reasoning_effort` per job (`none` for the copy jobs, default
+     `low`), empty model replies are retried and never counted as a finished job, and
+     `db_list_upcoming` hides past events still marked scheduled (completing them is phase 3's job).
+   - Known cost: `sync_upcoming` sends about 600k input tokens per run because every fetched event
+     page stays in the conversation. If free-tier token limits bite, run one short conversation per
+     event, as `refresh_fighters` does with batches.
 5. **`live_event`.** Run on a real event night in shadow mode, writing to a staging schema, before
    going live.
 6. **Service.** FastAPI, scheduler, Docker deploy.

@@ -101,3 +101,38 @@ def test_rate_limiter_waits_when_window_full():
     limiter.wait()
     limiter.wait()
     assert sleeps == [50.0]
+
+
+def test_reasoning_effort_per_provider():
+    bodies = {}
+
+    def capture(name):
+        def handler(request):
+            bodies[name] = json.loads(request.content)
+            return httpx.Response(200, json=completion())
+        return handler
+
+    gemini = provider("gemini", capture("gemini"))
+    openrouter = provider("openrouter", capture("openrouter"))
+    LLMClient([gemini], reasoning_effort="low").chat([{"role": "user", "content": "hi"}])
+    LLMClient([openrouter]).chat([{"role": "user", "content": "hi"}], reasoning_effort="none")
+    assert bodies["gemini"]["reasoning_effort"] == "low"
+    assert bodies["openrouter"]["reasoning"] == {"enabled": False}
+    assert "reasoning_effort" not in bodies["openrouter"]
+
+
+def test_no_reasoning_params_when_unset():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=completion())
+
+    LLMClient([provider("gemini", handler)]).chat([{"role": "user", "content": "hi"}])
+    assert "reasoning_effort" not in seen["body"]
+
+
+def test_rejects_unknown_reasoning_effort():
+    llm = LLMClient([provider("gemini", lambda r: httpx.Response(200, json=completion()))])
+    with pytest.raises(ValueError):
+        llm.chat([{"role": "user", "content": "hi"}], reasoning_effort="max")

@@ -97,3 +97,18 @@ def name_key(name):
     text = unicodedata.normalize("NFKD", (name or "").translate(TRANSLITERATE))
     text = "".join(ch for ch in text if not unicodedata.combining(ch)).lower()
     return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def inches_text(value):
+    """71.0 -> '71', 71.5 -> '71.5' (the backend stores inches as text)."""
+    if value is None:
+        return None
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def split_location(location):
+    """'Las Vegas, Nevada, USA' -> ('Las Vegas', 'USA')"""
+    parts = [part.strip() for part in (location or "").split(",") if part.strip()]
+    city = parts[0] if parts else None
+    country = parts[-1] if len(parts) > 1 else None
+    return city, country

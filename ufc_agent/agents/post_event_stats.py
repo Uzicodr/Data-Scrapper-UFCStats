@@ -1,7 +1,5 @@
 """Agent to fill per-fight stats and mark event completed. Runs day +1 and +2 post-event."""
-import json
-import re
-
+from ufc_agent.agents.loop import run_agent
 from ufc_agent.llm.client import LLMClient
 from ufc_agent.runlog import RunLog
 from ufc_agent.tools.registry import ToolRegistry
@@ -22,14 +20,10 @@ Important:
 - Only submit stats you can verify from the page
 """
 
-MAX_STEPS = 25
-
-
 class PostEventStatsAgent:
     def __init__(self, llm_client: LLMClient, registry: ToolRegistry):
         self.llm = llm_client
         self.registry = registry
-        self.tools = registry.get_schemas("post_event_stats")
 
     def run(self, event_id: str, run_log: RunLog) -> dict:
         """Run agent on event. Event must be marked 'completed' in DB before calling this.
@@ -37,56 +31,10 @@ class PostEventStatsAgent:
         Returns dict with summary, stats_submitted, errors.
         """
         job_input = {"event_id": event_id, "task": "extract per-fight stats"}
+        outcome = run_agent(self.llm, self.registry, "post_event_stats", SYSTEM_PROMPT, job_input, run_log)
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(job_input)},
-        ]
-
-        stats_submitted = 0
-        issues_flagged = 0
-
-        for step in range(MAX_STEPS):
-            # Call LLM
-            response = self.llm.chat(messages, tools=self.tools)
-            run_log.llm_step(response)
-
-            # Check for tool calls
-            if not response.message.tool_calls:
-                break
-
-            # Process each tool call
-            for call in response.message.tool_calls:
-                tool_name = call.function.name
-                try:
-                    args = json.loads(call.function.arguments)
-                except json.JSONDecodeError as e:
-                    result = {"error": f"Invalid JSON args: {e}"}
-                    is_error = True
-                else:
-                    dispatch_result = self.registry.dispatch(tool_name, args)
-                    result = dispatch_result["result"]
-                    is_error = dispatch_result["is_error"]
-
-                    # Count submissions
-                    if tool_name == "submit_fight_stats" and not is_error:
-                        stats_submitted += 1
-                    elif tool_name == "flag_issue":
-                        issues_flagged += 1
-
-                run_log.tool_step(tool_name, args, result, is_error=is_error)
-
-                # Add result to messages for next LLM call
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [call]  # OpenAI format
-                })
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": json.dumps(result)
-                })
+        stats_submitted = outcome["ok_calls"].get("submit_fight_stats", 0)
+        issues_flagged = outcome["ok_calls"].get("flag_issue", 0)
 
         summary = f"Event {event_id}: submitted {stats_submitted} stat sets, flagged {issues_flagged} issues"
         run_log.finish(status="completed", summary=summary)
@@ -96,7 +44,7 @@ class PostEventStatsAgent:
             "summary": summary,
             "stats_submitted": stats_submitted,
             "issues_flagged": issues_flagged,
-            "steps": step + 1,
+            "steps": outcome["steps"],
             "tokens_input": run_log.input_tokens,
             "tokens_output": run_log.output_tokens,
         }

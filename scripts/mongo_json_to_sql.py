@@ -8,74 +8,33 @@ deterministic UUID, and every insert is ON CONFLICT DO NOTHING, so the file is s
 """
 import datetime
 import json
-import re
 import sys
-import uuid
 from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from ufc_agent.ids import SOURCE, event_slug_base, row_uuid, slugify, unique_slug  # noqa: E402
 from ufc_agent.normalize import (  # noqa: E402
     clean,
     fight_round,
     fight_time,
     height_to_inches,
+    inches_text,
     name_key,
     parse_date,
+    split_location,
     to_float,
     to_int,
     ufcstats_id,
 )
 
-SOURCE = "ufcstats"
-UUID_NAMESPACE = uuid.UUID("6f1d3c52-6a8e-4d55-9a57-3b8f4c0e2a11")
 BATCH = 500
 NON_DIVISION_WEIGHT_CLASSES = {"Open Weight", "Catch Weight", "Super Heavyweight"}
 
 
-def row_uuid(kind, source_id):
-    return str(uuid.uuid5(UUID_NAMESPACE, f"{SOURCE}:{kind}:{source_id}"))
-
-
-def slugify(text):
-    return "-".join(name_key(text).split())
-
-
 def strip_mongo_id(doc):
     return {key: value for key, value in doc.items() if key != "_id"}
-
-
-def inches_text(value):
-    """71.0 -> '71', 71.5 -> '71.5' (backend stores inches as text)."""
-    if value is None:
-        return None
-    return str(int(value)) if float(value).is_integer() else str(value)
-
-
-def unique_slug(base, suffix, taken):
-    slug = base or suffix
-    if slug in taken:
-        slug = f"{base}-{suffix}"
-    taken.add(slug)
-    return slug
-
-
-def event_slug_base(name, event_date):
-    """Matches Cito's style: 'ufc-332', 'ufc-fight-night-october-11-2026'."""
-    numbered = re.match(r"UFC (\d+)\b", name)
-    if numbered:
-        return f"ufc-{numbered.group(1)}"
-    if name.startswith("UFC Fight Night"):
-        return f"ufc-fight-night-{event_date.strftime('%B-%d-%Y').lower()}"
-    return slugify(name)
-
-
-def split_location(location):
-    parts = [part.strip() for part in (location or "").split(",") if part.strip()]
-    city = parts[0] if parts else None
-    country = parts[-1] if len(parts) > 1 else None
-    return city, country
 
 
 # ---------------------------------------------------------------------------
