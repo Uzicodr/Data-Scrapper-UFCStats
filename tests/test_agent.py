@@ -8,7 +8,7 @@ from ufc_agent.tools.registry import ToolRegistry
 
 
 def test_system_prompt_exists():
-    assert "UFC data extraction" in SYSTEM_PROMPT
+    assert "submit_event_results" in SYSTEM_PROMPT
     assert "fetch_page" in SYSTEM_PROMPT
 
 
@@ -31,10 +31,7 @@ def test_tool_registry_schemas():
     tool_names = {s["function"]["name"] for s in schemas}
     expected = {
         "fetch_page",
-        "db_get_event",
-        "db_find_fighter",
-        "submit_fight_result",
-        "submit_fight_stats",
+        "submit_event_results",
         "flag_issue",
     }
     assert tool_names == expected

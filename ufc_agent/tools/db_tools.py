@@ -19,7 +19,7 @@ from ufc_agent.normalize import (
     to_float,
     ufcstats_id,
 )
-from ufc_agent.schemas.models import EventCard, FighterProfile, FightResult, FightStats, FightRoundStats, Rankings
+from ufc_agent.schemas.models import EventCard, EventResults, FighterProfile, Rankings
 
 UFCSTATS = "http://ufcstats.com"
 
@@ -66,8 +66,12 @@ class NameIndex:
 
 
 class DBTools:
-    def __init__(self, conn: psycopg.Connection):
+    def __init__(self, conn: psycopg.Connection, dry_run: bool = False):
+        """dry_run: submit_event_results and flag_issue run every check and write, then roll back, and
+        keep what they would have saved in self.recorded. The eval uses this to leave the data untouched."""
         self.conn = conn
+        self.dry_run = dry_run
+        self.recorded = []
         self._name_index = None
 
     def name_index(self) -> NameIndex:
@@ -97,15 +101,6 @@ class DBTools:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-    def list_upcoming(self, days: int = 30) -> list[dict]:
-        """List events within next N days."""
-        cursor = self.conn.execute(
-            "SELECT * FROM events WHERE status = 'scheduled' AND starts_at <= NOW() + make_interval(days => %s) "
-            "ORDER BY starts_at",
-            (days,)
-        )
-        return [dict(row) for row in cursor.fetchall()]
-
     def find_fighter(self, name: str) -> list[dict]:
         """Fuzzy match fighter by name. Returns top matches with similarity scores."""
         cursor = self.conn.execute(
@@ -113,112 +108,6 @@ class DBTools:
         )
         candidates = [dict(row) for row in cursor.fetchall()]
         return fuzzy_match(name, candidates, threshold=0.6)
-
-    def submit_fight_result(self, fight: FightResult, sources: list[str]) -> dict:
-        """Submit fight result with source URLs.
-
-        Returns dict with status, message, and any validation errors.
-        Requires two agreeing sources to mark result verified.
-        """
-        errors = []
-
-        # Validate fight data
-        if not fight.source or not fight.source_id or not fight.event_id:
-            errors.append("Missing source/source_id/event_id")
-        if fight.method not in ("win", "draw", "no_contest"):
-            errors.append(f"Invalid method: {fight.method}")
-        if fight.round < 1:
-            errors.append("Round must be >= 1")
-        if fight.time_seconds < 0:
-            errors.append("Time must be >= 0")
-
-        if errors:
-            return {"status": "error", "message": "Validation failed", "errors": errors}
-
-        try:
-            # Upsert fight with result
-            self.conn.execute(
-                """
-                UPDATE fights
-                SET winner_id = %s, method = %s, round = %s, time_seconds = %s,
-                    updated_at = NOW(), raw_payload = raw_payload || %s
-                WHERE source = %s AND source_id = %s
-                """,
-                (
-                    fight.winner_id, fight.method, fight.round, fight.time_seconds,
-                    psycopg.types.json.Jsonb({"sources": sources}),
-                    fight.source, fight.source_id
-                )
-            )
-            self.conn.commit()
-            return {"status": "ok", "message": f"Fight result recorded"}
-        except Exception as e:
-            self.conn.rollback()
-            return {"status": "error", "message": str(e)}
-
-    def submit_fight_stats(self, fight_id: str, stats: FightStats, source: str) -> dict:
-        """Submit per-fight stats for one fighter.
-
-        Both corners must be present before upsert. All values must be >= 0.
-        """
-        errors = []
-
-        # Validate stats
-        if stats.knockdowns < 0 or stats.sig_strikes_landed < 0:
-            errors.append("Stats must be >= 0")
-        if stats.sig_strikes_attempted < stats.sig_strikes_landed:
-            errors.append("Attempted must be >= landed")
-        if stats.takedowns_attempted < stats.takedowns_landed:
-            errors.append("Takedowns: attempted must be >= landed")
-
-        if errors:
-            return {"status": "error", "message": "Validation failed", "errors": errors}
-
-        try:
-            payload = {
-                "knockdowns": stats.knockdowns,
-                "sig_strikes": {
-                    "landed": stats.sig_strikes_landed,
-                    "attempted": stats.sig_strikes_attempted
-                },
-                "total_strikes": {
-                    "landed": stats.total_strikes_landed,
-                    "attempted": stats.total_strikes_attempted
-                },
-                "takedowns": {
-                    "landed": stats.takedowns_landed,
-                    "attempted": stats.takedowns_attempted
-                },
-                "submission_attempts": stats.submission_attempts,
-                "reversals": stats.reversals,
-                "control_time_seconds": stats.control_time_seconds,
-                "source": source
-            }
-
-            # Find fight by fighter_id
-            cursor = self.conn.execute(
-                "SELECT id, raw_payload FROM fights WHERE source_id = %s LIMIT 1",
-                (fight_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return {"status": "error", "message": f"Fight not found: {fight_id}"}
-
-            fight_id_db, existing_payload = row
-            existing_payload = existing_payload or {}
-
-            # Merge stats
-            existing_payload[f"stats_{stats.fighter_id}"] = payload
-
-            self.conn.execute(
-                "UPDATE fights SET raw_payload = %s, updated_at = NOW() WHERE id = %s",
-                (psycopg.types.json.Jsonb(existing_payload), fight_id_db)
-            )
-            self.conn.commit()
-            return {"status": "ok", "message": f"Stats recorded for fighter"}
-        except Exception as e:
-            self.conn.rollback()
-            return {"status": "error", "message": str(e)}
 
     def submit_rankings(self, rankings: Rankings) -> dict:
         """Replace one division's rankings. Every name must resolve to exactly one fighter.
@@ -263,6 +152,9 @@ class DBTools:
 
     def flag_issue(self, entity: str, reason: str) -> dict:
         """Log issue for human review."""
+        if self.dry_run:
+            self.recorded.append({"flag_issue": {"entity": entity, "reason": reason}})
+            return {"status": "ok", "message": "Issue flagged (dry run)"}
         try:
             self.conn.execute(
                 "INSERT INTO review_queue (id, entity_type, reason, status) VALUES (%s, %s, %s, 'open')",
@@ -556,3 +448,185 @@ class DBTools:
             return {"status": "error", "message": str(e)}
         self._name_index = None
         return {"status": "ok", "message": f"{name}: profile updated ({wins}-{losses}-{draws})"}
+
+    # ------------------------------------------------------------------
+    # Completed events (post_event_stats)
+    # ------------------------------------------------------------------
+    def events_awaiting_results(self, hours_after_start: int = 6) -> list[dict]:
+        """ufcstats events still scheduled or live that started at least N hours ago."""
+        rows = self.conn.execute(
+            "SELECT id FROM events WHERE source = %s AND status IN ('scheduled', 'live') AND NOT manual_override "
+            "AND starts_at <= NOW() - make_interval(hours => %s) ORDER BY starts_at",
+            (SOURCE, hours_after_start),
+        ).fetchall()
+        return [str(r["id"]) for r in rows]
+
+    def event_for_results(self, event_id: str) -> Optional[dict]:
+        """Compact job input for post_event_stats: the event and the bouts the database expects."""
+        event = self.conn.execute(
+            "SELECT id, name, starts_at::date AS date, status, source, source_id FROM events WHERE id = %s",
+            (event_id,),
+        ).fetchone()
+        if event is None or event["source"] != SOURCE:
+            return None
+        fights = self.conn.execute(
+            "SELECT x.source_id, x.bout_order, x.status, r.name AS red, b.name AS blue FROM fights x "
+            "LEFT JOIN fighters r ON r.id = x.red_fighter_id LEFT JOIN fighters b ON b.id = x.blue_fighter_id "
+            "WHERE x.event_id = %s ORDER BY x.bout_order NULLS LAST",
+            (event_id,),
+        ).fetchall()
+        return {
+            "event": {
+                "name": event["name"],
+                "date": event["date"].isoformat(),
+                "status": event["status"],
+                "event_url": f"{UFCSTATS}/event-details/{event['source_id']}",
+            },
+            "fights_in_database": [f"{f['red']} vs {f['blue']} ({f['status']})" for f in fights],
+        }
+
+    def submit_event_results(self, results: EventResults) -> dict:
+        """Record every fight of a completed event and mark the event completed.
+
+        Fighters are matched by their ufcstats URL, never by corner: the results page lists the winner
+        first, which need not be the red corner stored for the bout. Stored corners are kept and the
+        stats are mapped onto them. Bouts still scheduled but missing from the results are marked
+        cancelled. Text values in raw_payload use the same keys and formats as the seeded data.
+        """
+        event_source_id = ufcstats_id(results.event_url)
+        try:
+            event = self.conn.execute(
+                "SELECT id, name, status, manual_override FROM events WHERE source = %s AND source_id = %s",
+                (SOURCE, event_source_id),
+            ).fetchone()
+            if event is None:
+                self.conn.rollback()
+                return {"status": "error", "message": f"Event {results.event_url} is not in the database"}
+            if event["manual_override"]:
+                self.conn.rollback()
+                return {"status": "ok", "message": f"{event['name']}: manual override set, left unchanged"}
+            event_id = str(event["id"])
+
+            rows = self.conn.execute(
+                "SELECT id, source_id, red_fighter_id, blue_fighter_id, status, manual_override FROM fights "
+                "WHERE event_id = %s",
+                (event_id,),
+            ).fetchall()
+            by_source_id = {r["source_id"]: r for r in rows}
+            by_pair = {frozenset(map(str, (r["red_fighter_id"], r["blue_fighter_id"]))): r
+                       for r in rows if r["red_fighter_id"] and r["blue_fighter_id"]}
+
+            errors, new_fighters, written_ids, recorded_fights = [], [], set(), []
+            for order, fight in enumerate(results.fights, start=1):
+                label = f"fight {order}"
+                ids = []
+                for line in fight.fighters:
+                    fighter_id, created = self._fighter_for_bout(line.name, line.url, fight.weight_class)
+                    ids.append(fighter_id)
+                    if created:
+                        new_fighters.append(line.name)
+                source_id = ufcstats_id(fight.fight_url)
+                # Bouts synced without a fight URL have a made-up source id; match those by the fighter pair.
+                row = by_source_id.get(source_id) or by_pair.get(frozenset(ids))
+                if row is not None and row["manual_override"]:
+                    written_ids.add(row["id"])
+                    continue
+
+                stored = {str(row["red_fighter_id"]), str(row["blue_fighter_id"])} if row else set()
+                if row is not None and row["red_fighter_id"] and row["blue_fighter_id"] and stored != set(ids):
+                    errors.append(f"{label}: fighters {[l.name for l in fight.fighters]} do not match the bout "
+                                  f"stored for {fight.fight_url}")
+                    continue
+                red_id = str(row["red_fighter_id"]) if row and row["red_fighter_id"] else ids[0]
+                blue_id = ids[1] if red_id == ids[0] else ids[0]
+                line_for = dict(zip(ids, fight.fighters))
+                red, blue = line_for[red_id], line_for[blue_id]
+                winner_id = ids[0] if fight.outcome == "win" else None
+
+                def pair(field):
+                    return {"red": str(getattr(red, field)), "blue": str(getattr(blue, field))}
+
+                payload = {
+                    "result": fight.outcome,
+                    "winner": fight.fighters[0].name if fight.outcome == "win" else "",
+                    "fighter_red": red.name,
+                    "fighter_blue": blue.name,
+                    "fighters": [red.name, blue.name],
+                    "fighter_profile_links": [red.url, blue.url],
+                    "fight_detail_link": fight.fight_url,
+                    "kd": pair("kd"), "str": pair("sig_str"), "td": pair("td"), "sub": pair("sub"),
+                    "fighter_stats": [
+                        {"fighter_name": line.name, "corner": corner, "kd": str(line.kd), "str": str(line.sig_str),
+                         "td": str(line.td), "sub": str(line.sub)}
+                        for corner, line in (("red", red), ("blue", blue))
+                    ],
+                    "method_details": clean(fight.method_details) or "",
+                    "sources": results.sources,
+                    "completed_by": "post_event_stats",
+                }
+                values = (red_id, blue_id, winner_id, clean(fight.weight_class), order, fight.is_title_fight,
+                          fight.method, fight.round, fight.time.strip())
+                if row is None:
+                    fight_id = row_uuid("fight", source_id)
+                    self.conn.execute(
+                        "INSERT INTO fights (id, event_id, red_fighter_id, blue_fighter_id, winner_fighter_id, "
+                        "weight_class, bout_order, is_title_fight, method, result_round, result_time, status, "
+                        "source, source_id, raw_payload, updated_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'completed', %s, %s, %s, NOW())",
+                        (fight_id, event_id, *values, SOURCE, source_id, Jsonb(payload)),
+                    )
+                else:
+                    fight_id = row["id"]
+                    self.conn.execute(
+                        "UPDATE fights SET red_fighter_id = %s, blue_fighter_id = %s, winner_fighter_id = %s, "
+                        "weight_class = %s, bout_order = %s, is_title_fight = %s, method = %s, result_round = %s, "
+                        "result_time = %s, status = 'completed', source_id = %s, "
+                        "raw_payload = COALESCE(raw_payload, '{}'::jsonb) || %s, updated_at = NOW() WHERE id = %s",
+                        (*values, source_id, Jsonb(payload), fight_id),
+                    )
+                written_ids.add(fight_id)
+                recorded_fights.append({
+                    "source_id": source_id, "outcome": fight.outcome, "winner_fighter_id": winner_id,
+                    "method": fight.method, "round": fight.round, "time": fight.time.strip(),
+                    "is_title_fight": fight.is_title_fight,
+                    "stats": {fid: {"kd": l.kd, "sig_str": l.sig_str, "td": l.td, "sub": l.sub}
+                              for fid, l in line_for.items()},
+                })
+
+            if errors:
+                self.conn.rollback()
+                return {"status": "error", "message": "Results not saved", "errors": errors}
+
+            dropped = [r["id"] for r in rows if r["id"] not in written_ids
+                       and r["status"] == "scheduled" and not r["manual_override"]]
+            cancelled = []
+            if dropped:
+                cancelled = [
+                    f"{r['red']} vs {r['blue']}" for r in self.conn.execute(
+                        "UPDATE fights SET status = 'cancelled', updated_at = NOW() WHERE id = ANY(%s) "
+                        "RETURNING raw_payload->>'fighter_red' AS red, raw_payload->>'fighter_blue' AS blue",
+                        (dropped,),
+                    ).fetchall()
+                ]
+            self.conn.execute(
+                "UPDATE events SET status = 'completed', "
+                "raw_payload = COALESCE(raw_payload, '{}'::jsonb) || %s, updated_at = NOW() WHERE id = %s",
+                (Jsonb({"results_sources": results.sources, "completed_by": "post_event_stats"}), event_id),
+            )
+            if self.dry_run:
+                self.conn.rollback()
+                self.recorded.append({"event_url": results.event_url, "fights": recorded_fights})
+            else:
+                self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            return {"status": "error", "message": str(e)}
+
+        if new_fighters and not self.dry_run:
+            self._name_index = None
+        return {
+            "status": "ok",
+            "message": f"{event['name']}: {len(recorded_fights)} fights completed" + (" (dry run)" if self.dry_run else ""),
+            "new_fighters": new_fighters,
+            "cancelled_bouts": cancelled,
+        }

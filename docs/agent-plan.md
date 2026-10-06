@@ -210,9 +210,22 @@ Dockerfile
      full fight cards, so card and stats work must fetch pages (ufc.com, ufcstats.com). The
      ufcstats "completed" list shows the next upcoming event as its first row; skip events dated in
      the future.
-3. **First agent: `post_event_stats`.** Chosen first because the seeded data is ground truth for it.
-   Build an eval on 30 past events. Measure field accuracy and invented-data rate. Tune prompts until
-   results are at least 98% correct.
+3. **`post_event_stats` and eval. Built; eval blocked on daily LLM quota.**
+   - The agent reads the completed event page once (`fetch_page(include_links=true)`) and calls
+     `submit_event_results` with every fight: outcome, method, round, time, title fight, and each
+     fighter's KD, Str, Td and Sub. Fighters are matched by URL, not corner (ufcstats lists the winner
+     first). Fights and the event are marked `completed`; bouts missing from the results are marked
+     `cancelled`. Pick settlement is deferred.
+   - Run: `python -m ufc_agent.agents.post_event_stats [--event-id <uuid>]`. Default targets are
+     ufcstats events still `scheduled`/`live` 6+ hours after their start.
+   - Eval: `python -m evals.eval_runner [--events 30] [--skip N]`. Uses `DBTools(dry_run=True)`: every
+     check and write runs, then rolls back, so the seeded ground truth is never changed (verified by
+     table checksums before and after). Scores 13 fields per fight against the seeded data.
+   - First full run: the 6 events that reached a model scored 975/975 fields (100%), 0 invented
+     fights. The other 24 got no model: both free tiers hit their **daily** caps (Gemini
+     `gemini-2.5-flash` 20 requests/day; OpenRouter free models 50/day without credits).
+   - Remaining: finish the eval (`--skip 6`) once quota resets, then run the job for real on the past
+     events still marked `scheduled` (Aug 29 to Oct 3).
 4. **More agents. Done.**
    - `sync_rankings` (`python -m ufc_agent.agents.sync_rankings`): reads ufc.com/rankings and replaces
      each division's rows. Live run saved all 13 divisions; every linked fighter appears on the page.
@@ -237,7 +250,16 @@ Dockerfile
    going live.
 6. **Service.** FastAPI, scheduler, Docker deploy.
 
-## 12. Risks
+## 12. Daily LLM budget
+
+The free tiers allow about 70 LLM calls a day in total, and one day of jobs needs roughly:
+`sync_rankings` ~18, `sync_upcoming` ~30, `post_event_stats` ~3 per event, `refresh_fighters` ~3 per
+5 fighters. That fits only on quiet days and leaves nothing for evals. Adding 10 credits to
+OpenRouter raises its free-model cap to 1,000 requests a day, which covers everything. The client
+benches a provider until the reset time a 429 names, waits out short cooldowns, and raises
+`QuotaExhausted` when every provider is out for longer than 2 minutes.
+
+## 13. Risks
 
 | Risk | Mitigation |
 |---|---|
@@ -248,7 +270,7 @@ Dockerfile
 | Stats page layout changes | `fetch_page` returns cleaned text, so the LLM reads it without fixed selectors. |
 | Overlap with Cito data later | Rows are separated by `source`. Decide on a single source of truth per table before re-enabling Cito. |
 
-## 13. Open decisions
+## 14. Open decisions
 
 1. Hosting for the always-on Python service (small VM, Render, Fly.io or Railway).
 2. How pick settlement is triggered when the agent completes a fight.

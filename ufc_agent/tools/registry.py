@@ -5,7 +5,9 @@ from typing import Callable, Optional
 from pydantic import ValidationError
 
 from ufc_agent.fetch.http import Fetcher
-from ufc_agent.schemas.models import DIVISIONS, RANKED_PER_DIVISION, EventCard, FighterProfile, Rankings
+from ufc_agent.schemas.models import (
+    DIVISIONS, METHODS, RANKED_PER_DIVISION, EventCard, EventResults, FighterProfile, Rankings,
+)
 from ufc_agent.search.grounded import GroundedSearch
 from ufc_agent.tools.db_tools import DBTools
 
@@ -41,8 +43,7 @@ class ToolRegistry:
             "db_get_event": self._db_get_event,
             "db_list_upcoming": self._db_list_upcoming,
             "db_find_fighter": self._db_find_fighter,
-            "submit_fight_result": self._submit_fight_result,
-            "submit_fight_stats": self._submit_fight_stats,
+            "submit_event_results": self._submit_event_results,
             "submit_rankings": self._submit_rankings,
             "submit_event_card": self._submit_event_card,
             "submit_fighter_profile": self._submit_fighter_profile,
@@ -54,10 +55,7 @@ class ToolRegistry:
         job_tools = {
             "post_event_stats": [
                 "fetch_page",
-                "db_get_event",
-                "db_find_fighter",
-                "submit_fight_result",
-                "submit_fight_stats",
+                "submit_event_results",
                 "flag_issue",
             ],
             "sync_rankings": [
@@ -131,16 +129,6 @@ class ToolRegistry:
             return {"candidates": [], "error": f"No matches for: {name}"}
         return {"candidates": candidates[:5]}  # Top 5
 
-    def _submit_fight_result(self, event_name: str, winner: str, method: str,
-                            round: int, time_seconds: int, sources: list[str]) -> dict:
-        """Submit fight result for an event. Expects LLM to provide cleaned data."""
-        return {"status": "pending", "message": "submit_fight_result: define full schema"}
-
-    def _submit_fight_stats(self, fighter_name: str, event_name: str, stats: dict,
-                           source: str) -> dict:
-        """Submit per-fight stats. Expects LLM to provide stats dict."""
-        return {"status": "pending", "message": "submit_fight_stats: define full schema"}
-
     def _submit_rankings(self, division: str, ranked: list[dict], sources: list[str],
                          champion: Optional[dict] = None) -> dict:
         """Validate a full division list, then replace that division's rows."""
@@ -149,6 +137,14 @@ class ToolRegistry:
         except ValidationError as e:
             return validation_error(e)
         return self.db_tools.submit_rankings(rankings)
+
+    def _submit_event_results(self, **results) -> dict:
+        """Validate every fight of a completed event, then record them and complete the event."""
+        try:
+            event_results = EventResults(**results)
+        except ValidationError as e:
+            return validation_error(e)
+        return self.db_tools.submit_event_results(event_results)
 
     def _submit_event_card(self, **card) -> dict:
         """Validate a full upcoming card, then create or update the event and its bouts."""
@@ -246,47 +242,6 @@ class ToolRegistry:
                     "required": ["name"]
                 }
             },
-            "submit_fight_result": {
-                "name": "submit_fight_result",
-                "description": "Submit fight result (winner, method, round, time) with source URLs",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "event_name": {"type": "string"},
-                        "winner": {"type": "string"},
-                        "method": {"type": "string", "enum": ["win", "draw", "no_contest"]},
-                        "round": {"type": "integer", "minimum": 1},
-                        "time_seconds": {"type": "integer", "minimum": 0},
-                        "sources": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["event_name", "method", "round", "time_seconds", "sources"]
-                }
-            },
-            "submit_fight_stats": {
-                "name": "submit_fight_stats",
-                "description": "Submit per-fight stats (strikes, takedowns, etc.)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "fighter_name": {"type": "string"},
-                        "event_name": {"type": "string"},
-                        "stats": {
-                            "type": "object",
-                            "properties": {
-                                "knockdowns": {"type": "integer", "minimum": 0},
-                                "sig_strikes_landed": {"type": "integer", "minimum": 0},
-                                "sig_strikes_attempted": {"type": "integer", "minimum": 0},
-                                "takedowns_landed": {"type": "integer", "minimum": 0},
-                                "takedowns_attempted": {"type": "integer", "minimum": 0},
-                                "submission_attempts": {"type": "integer", "minimum": 0},
-                                "control_time_seconds": {"type": "integer", "minimum": 0},
-                            }
-                        },
-                        "source": {"type": "string"}
-                    },
-                    "required": ["fighter_name", "event_name", "stats", "source"]
-                }
-            },
             "submit_rankings": {
                 "name": "submit_rankings",
                 "description": "Replace one division's rankings with the full current list. "
@@ -305,6 +260,60 @@ class ToolRegistry:
                     },
                     "required": ["division", "ranked", "sources"]
                 }
+            },
+            "submit_event_results": {
+                "name": "submit_event_results",
+                "description": "Record every fight of one completed event and mark the event completed. "
+                               "Fighters are matched by URL. Scheduled bouts missing from the results are "
+                               "marked cancelled.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_url": {"type": "string", "description": "ufcstats.com/event-details/... URL"},
+                        "fights": {
+                            "type": "array", "minItems": 1,
+                            "description": "Every fight row in page order",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "fight_url": {"type": "string", "description": "The row's fight-details URL"},
+                                    "outcome": {"type": "string", "enum": ["win", "draw", "nc"],
+                                                "description": "The W/L column"},
+                                    "fighters": {
+                                        "type": "array", "minItems": 2, "maxItems": 2,
+                                        "description": "Both fighters in the order the row lists them",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "url": {"type": "string", "description": "fighter-details URL"},
+                                                "kd": {"type": "integer", "minimum": 0},
+                                                "sig_str": {"type": "integer", "minimum": 0,
+                                                            "description": "Str column"},
+                                                "td": {"type": "integer", "minimum": 0},
+                                                "sub": {"type": "integer", "minimum": 0},
+                                            },
+                                            "required": ["name", "url", "kd", "sig_str", "td", "sub"],
+                                        },
+                                    },
+                                    "weight_class": {"type": "string",
+                                                     "description": "Weight class text without [img:...] marks"},
+                                    "is_title_fight": {"type": "boolean",
+                                                       "description": "True only when the row shows [img:belt.png]"},
+                                    "method": {"type": "string", "enum": list(METHODS)},
+                                    "method_details": {"type": "string",
+                                                       "description": "Rest of the Method column, e.g. 'Punch'"},
+                                    "round": {"type": "integer", "minimum": 1, "maximum": 5},
+                                    "time": {"type": "string", "description": "m:ss as printed"},
+                                },
+                                "required": ["fight_url", "outcome", "fighters", "method", "round", "time"],
+                            },
+                        },
+                        "sources": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "description": "URLs the results were read from"},
+                    },
+                    "required": ["event_url", "fights", "sources"],
+                },
             },
             "submit_event_card": {
                 "name": "submit_event_card",

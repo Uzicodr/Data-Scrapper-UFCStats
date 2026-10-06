@@ -136,3 +136,59 @@ def test_rejects_unknown_reasoning_effort():
     llm = LLMClient([provider("gemini", lambda r: httpx.Response(200, json=completion()))])
     with pytest.raises(ValueError):
         llm.chat([{"role": "user", "content": "hi"}], reasoning_effort="max")
+
+
+def test_quota_reset_seconds_reads_gemini_and_openrouter_errors():
+    from ufc_agent.llm.client import quota_reset_seconds
+
+    def error(body):
+        return openai.RateLimitError("Rate limited", response=httpx.Response(429, request=httpx.Request("POST", "http://x")),
+                                     body=body)
+
+    gemini = error([{"error": {"message": "Quota exceeded, limit: 20. Please retry in 9h10m26.49s."}}])
+    assert round(quota_reset_seconds(gemini)) == 9 * 3600 + 10 * 60 + 26
+    openrouter = error({"message": "free-models-per-day", "metadata": {"headers": {"X-RateLimit-Reset": "1791331200000"}}})
+    assert quota_reset_seconds(openrouter, now_epoch=1791331200 - 3600) == 3600
+    assert quota_reset_seconds(error({"message": "slow down"})) is None
+
+
+def test_daily_quota_benches_provider_and_raises_quota_exhausted():
+    from ufc_agent.llm.client import QuotaExhausted
+
+    body = {"error": {"message": "Quota exceeded. Please retry in 2h0m0s."}}
+    llm = LLMClient([provider("a", lambda r: httpx.Response(429, json=body))], clock=lambda: 0.0)
+    with pytest.raises(QuotaExhausted) as raised:
+        llm.chat([{"role": "user", "content": "hi"}])
+    assert raised.value.retry_in_seconds == 7200
+    with pytest.raises(QuotaExhausted):  # still benched: fails without calling the provider
+        llm.chat([{"role": "user", "content": "hi"}])
+
+
+def test_short_shared_cooldown_is_waited_out():
+    now, sleeps, calls = [0.0], [], {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": {"message": "slow down"}})
+        return httpx.Response(200, json=completion("back"))
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    llm = LLMClient([provider("a", handler)], clock=lambda: now[0], cooldown_seconds=30, sleep=sleep)
+    with pytest.raises(AllProvidersFailed):
+        llm.chat([{"role": "user", "content": "hi"}])
+    assert llm.chat([{"role": "user", "content": "hi"}]).message.content == "back"
+    assert sleeps == [30.0]
+
+
+def test_opencode_provider_is_built_from_chain(monkeypatch):
+    from ufc_agent.llm.client import build_provider, reasoning_params
+
+    monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+    provider_ = build_provider("opencode:space-bunny-free")
+    assert (provider_.name, provider_.model) == ("opencode", "space-bunny-free")
+    assert str(provider_.client.base_url).startswith("https://opencode.ai/zen/v1")
+    assert reasoning_params("opencode", "none") == {}  # unknown support: send nothing

@@ -1,7 +1,7 @@
 """Pydantic schemas for UFC data validation."""
 import re
-from datetime import date, datetime, timedelta
-from typing import Optional
+from datetime import date, timedelta
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -14,71 +14,6 @@ WEIGHT_DIVISIONS = (
 POUND_FOR_POUND = ("Men's Pound-for-Pound", "Women's Pound-for-Pound")
 DIVISIONS = POUND_FOR_POUND + WEIGHT_DIVISIONS
 RANKED_PER_DIVISION = 15
-
-
-class FightStats(BaseModel):
-    """Per-fight stats from ufcstats.com."""
-    fighter_id: str = Field(..., description="Source ID of fighter")
-    knockdowns: int = Field(ge=0, description="Total knockdowns")
-    sig_strikes_landed: int = Field(ge=0, description="Significant strikes landed")
-    sig_strikes_attempted: int = Field(ge=0, description="Significant strikes attempted")
-    total_strikes_landed: int = Field(ge=0, description="Total strikes landed")
-    total_strikes_attempted: int = Field(ge=0, description="Total strikes attempted")
-    takedowns_landed: int = Field(ge=0, description="Takedowns landed")
-    takedowns_attempted: int = Field(ge=0, description="Takedowns attempted")
-    submission_attempts: int = Field(ge=0, description="Submission attempts")
-    reversals: int = Field(ge=0, description="Reversals")
-    control_time_seconds: int = Field(ge=0, description="Control time in seconds")
-
-
-class FightRoundStats(BaseModel):
-    """Per-round stats when a source provides them."""
-    fighter_id: str
-    round_num: int = Field(ge=1)
-    knockdowns: int = Field(ge=0)
-    sig_strikes_landed: int = Field(ge=0)
-    sig_strikes_attempted: int = Field(ge=0)
-    total_strikes_landed: int = Field(ge=0)
-    total_strikes_attempted: int = Field(ge=0)
-    takedowns_landed: int = Field(ge=0)
-    takedowns_attempted: int = Field(ge=0)
-    submission_attempts: int = Field(ge=0)
-    reversals: int = Field(ge=0)
-    control_time_seconds: int = Field(ge=0)
-
-
-class FightResult(BaseModel):
-    """Result of a single fight with source reference."""
-    source: str = Field(description="Source identifier (e.g., 'ufcstats')")
-    source_id: str = Field(description="Source's internal ID")
-    event_id: str = Field(description="Event source ID")
-    winner_id: Optional[str] = Field(None, description="Winner source ID; None if draw/no-contest")
-    method: str = Field(description="win, draw, no_contest, etc.")
-    round: int = Field(ge=1, description="Round fight ended")
-    time_seconds: int = Field(ge=0, description="Time in round where fight ended")
-    stats_red: Optional[FightStats] = None
-    stats_blue: Optional[FightStats] = None
-    round_stats: list[FightRoundStats] = Field(default_factory=list)
-
-
-class EventSummary(BaseModel):
-    """Minimal event data for queries."""
-    source: str
-    source_id: str
-    name: str
-    date: datetime
-
-
-class Fighter(BaseModel):
-    """Fighter profile."""
-    source: str
-    source_id: str
-    name: str
-    nickname: Optional[str] = None
-    weight_class: Optional[str] = None
-    record_wins: Optional[int] = None
-    record_losses: Optional[int] = None
-    record_draws: Optional[int] = None
 
 
 class RankedFighter(BaseModel):
@@ -237,3 +172,78 @@ class FighterProfile(BaseModel):
         match = RECORD_RE.match(self.record.strip())
         wins, losses, draws, no_contests = match.groups()
         return int(wins), int(losses), int(draws), int(no_contests or 0)
+
+
+# ---------------------------------------------------------------------------
+# Completed event results (post_event_stats)
+# ---------------------------------------------------------------------------
+METHODS = ("KO/TKO", "SUB", "U-DEC", "S-DEC", "M-DEC", "DQ", "CNC", "Overturned", "Other")
+TIME_RE = re.compile(r"^([0-5]?\d):([0-5]\d)$")
+
+
+class FighterLine(BaseModel):
+    """One fighter's row values on a completed event page."""
+    name: str = Field(min_length=1)
+    url: str
+    kd: int = Field(ge=0, le=20, description="Kd column")
+    sig_str: int = Field(ge=0, le=600, description="Str column (significant strikes landed)")
+    td: int = Field(ge=0, le=40, description="Td column (takedowns landed)")
+    sub: int = Field(ge=0, le=40, description="Sub column (submission attempts)")
+
+
+class FightOutcome(BaseModel):
+    """One finished fight. fighters are in page order; with outcome 'win' the first one won."""
+    fight_url: str
+    outcome: Literal["win", "draw", "nc"]
+    fighters: list[FighterLine] = Field(min_length=2, max_length=2)
+    weight_class: Optional[str] = None
+    is_title_fight: bool = False
+    method: str
+    method_details: Optional[str] = None
+    round: int = Field(ge=1, le=5)
+    time: str
+
+
+class EventResults(BaseModel):
+    """Every fight of one completed event, in page order."""
+    event_url: str
+    fights: list[FightOutcome] = Field(min_length=1)
+    sources: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_results(self):
+        errors = []
+        if not UFCSTATS_EVENT_URL.match(self.event_url):
+            errors.append(f"event_url must be a ufcstats.com/event-details/ URL, got {self.event_url!r}")
+        seen_fights, seen_fighters = set(), set()
+        for number, fight in enumerate(self.fights, start=1):
+            label = f"fight {number}"
+            if not UFCSTATS_FIGHT_URL.match(fight.fight_url):
+                errors.append(f"{label}: fight_url {fight.fight_url!r} is not a ufcstats fight-details URL")
+            if fight.fight_url in seen_fights:
+                errors.append(f"{label}: fight_url listed twice")
+            seen_fights.add(fight.fight_url)
+            for line in fight.fighters:
+                if not UFCSTATS_FIGHTER_URL.match(line.url):
+                    errors.append(f"{label}: {line.name} url {line.url!r} is not a ufcstats fighter-details URL")
+                if line.url in seen_fighters:
+                    errors.append(f"{label}: {line.name} appears in more than one fight")
+                seen_fighters.add(line.url)
+            if fight.fighters[0].url == fight.fighters[1].url:
+                errors.append(f"{label}: both fighters have the same url")
+            if fight.method not in METHODS:
+                errors.append(f"{label}: method {fight.method!r} must be one of {list(METHODS)}; "
+                              "put the rest in method_details")
+            match = TIME_RE.match(fight.time.strip())
+            if not match or int(match.group(1)) * 60 + int(match.group(2)) > 300:
+                errors.append(f"{label}: time {fight.time!r} must be m:ss, at most 5:00")
+            elif fight.method.endswith("-DEC") and fight.time.strip() != "5:00":
+                errors.append(f"{label}: a decision ends at 5:00, got {fight.time!r}")
+            if fight.weight_class and "[img" in fight.weight_class:
+                errors.append(f"{label}: weight_class must be plain text without [img:...] marks")
+        bad_sources = [s for s in self.sources if not s.startswith(("http://", "https://"))]
+        if bad_sources:
+            errors.append(f"Sources must be URLs: {bad_sources}")
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self
