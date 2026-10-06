@@ -1,0 +1,19 @@
+name: Post-event results and stats
+
+on:
+  schedule:
+    # Every 6 hours. Picks up events still scheduled or live 6+ hours after their start; exits without an
+    # LLM call when there are none. An event whose ufcstats page is not ready yet is retried next run.
+    - cron: "0 4,10,16,22 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: post-event-stats
+  cancel-in-progress: false
+
+jobs:
+  results:
+    uses: ./.github/workflows/_run-job.yml
+    with:
+      command: ufc_agent.agents.post_event_stats
+    secrets: inherit

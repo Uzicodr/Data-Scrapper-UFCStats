@@ -1,0 +1,46 @@
+# Shared steps for every agent job. Called by the scheduled workflows in this folder.
+name: Run agent job
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: "Module and arguments after `python -m`"
+        required: true
+        type: string
+      timeout-minutes:
+        required: false
+        type: number
+        default: 30
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ${{ inputs.command }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          LLM_CHAIN: ${{ vars.LLM_CHAIN }}
+          PYTHONUNBUFFERED: "1"
+        run: python -m ${{ inputs.command }}
+
+      - name: Keep shadow-mode output
+        if: always() && hashFiles('data/live_shadow/*.jsonl') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-shadow-${{ github.run_id }}
+          path: data/live_shadow/*.jsonl

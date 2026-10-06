@@ -1,0 +1,27 @@
+name: Live event results
+
+on:
+  schedule:
+    # Hourly check. Exits in seconds when no event is on. When one is (15 minutes before its first card
+    # section until 10 hours after), it watches the ufc.com page every 2 minutes for up to 5h50m, under
+    # GitHub's 6-hour job limit. A card that runs longer is picked up by the next hourly run.
+    - cron: "5 * * * *"
+  workflow_dispatch:
+    inputs:
+      shadow:
+        description: "Shadow mode: save nothing, upload what would have been saved"
+        type: boolean
+        default: false
+
+concurrency:
+  # One watcher at a time; the next hourly run waits for the current one instead of starting a second.
+  group: live-event
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    uses: ./.github/workflows/_run-job.yml
+    with:
+      command: ufc_agent.agents.live_event --auto --max-hours 5.8${{ inputs.shadow && ' --shadow' || '' }}
+      timeout-minutes: 360
+    secrets: inherit

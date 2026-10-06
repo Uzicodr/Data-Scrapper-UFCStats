@@ -1,0 +1,17 @@
+name: Sync upcoming cards
+
+on:
+  schedule:
+    - cron: "0 14 * * *"  # daily 14:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upcoming
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    uses: ./.github/workflows/_run-job.yml
+    with:
+      command: ufc_agent.agents.sync_upcoming
+    secrets: inherit

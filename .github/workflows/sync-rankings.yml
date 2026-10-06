@@ -1,0 +1,19 @@
+name: Sync rankings
+
+on:
+  schedule:
+    # ufc.com updates rankings once a week, early in the week after an event. One run a week keeps the
+    # free LLM quota for the other jobs; start it by hand after a big result.
+    - cron: "0 15 * * 3"  # Wednesday 15:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: sync-rankings
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    uses: ./.github/workflows/_run-job.yml
+    with:
+      command: ufc_agent.agents.sync_rankings
+    secrets: inherit
