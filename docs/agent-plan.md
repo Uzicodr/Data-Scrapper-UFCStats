@@ -69,7 +69,7 @@ Where search works and where it does not:
 | `live_event` | From event start until the main event ends | Only on change | Fetch the results page every 2 minutes and hash it. Run the agent only when the hash changes. Fallback: a search every 10 minutes. |
 | `post_event_stats` | Event day +1, again at +2 | Yes | Fill per-fight stats, mark the event `completed`, confirm results. |
 | `refresh_fighters` | After `post_event_stats` | Yes | Update record and career stats, only for fighters who just fought (about 28 per event). |
-| `sync_news` | Hourly | No | Read the ESPN, UFC.com and Sherdog RSS feeds into `news_items`. Tag fighters by name and sort stories into kinds with keyword rules. Store headlines and summaries unchanged, and keep 30 days. |
+| `sync_news` | Hourly | No | Read the ESPN, UFC.com, Sherdog, MMA Weekly, BBC Sport and Guardian RSS feeds into `news_items`. Tag fighters by name and sort stories into kinds with keyword rules. Store headlines and summaries unchanged, and keep 30 days. Stories without a feed photo get a free Wikipedia photo of a tagged fighter (cached in `fighter_photos`) or an Unsplash cage photo, with credits. |
 | `ask` | API call | Yes | Answer ad-hoc questions using read-only DB tools. |
 
 The live job keeps LLM calls to roughly 14 to 30 per event instead of about 360.
