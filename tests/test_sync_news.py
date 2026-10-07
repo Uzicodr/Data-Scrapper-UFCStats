@@ -62,6 +62,46 @@ def test_parse_feed_reads_media_image():
     assert parse_feed(xml, NOW)[0].image_url == "https://cdn.ufc.com/x.jpg"
 
 
+def test_parse_feed_picks_widest_image_and_credit():
+    xml = """<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+      <title>T</title><link>https://www.theguardian.com/n</link>
+      <media:content width="140" url="https://i.guim.co.uk/small.jpg"><media:credit>Photograph: Jo Doe/AP</media:credit></media:content>
+      <media:content width="700" url="https://i.guim.co.uk/big.jpg"/>
+      <media:content medium="video" width="1920" url="https://i.guim.co.uk/clip.mp4"/>
+    </item></channel></rss>"""
+    item = parse_feed(xml, NOW)[0]
+    assert item.image_url == "https://i.guim.co.uk/big.jpg"
+    assert item.image_credit == "Jo Doe/AP"
+
+
+def test_parse_feed_accepts_junk_enclosure_type_and_upsizes_bbc_thumbnails():
+    xml = """<rss xmlns:media="http://search.yahoo.com/mrss/"><channel>
+      <item><title>A</title><link>https://www.mmaweekly.com/a</link>
+        <enclosure url="https://www.mmaweekly.com/a.jpg" length="0" type="false"/></item>
+      <item><title>B</title><link>https://www.bbc.co.uk/b</link>
+        <media:thumbnail width="240" url="https://ichef.bbci.co.uk/ace/standard/240/cps/x.jpg"/></item>
+    </channel></rss>"""
+    a, b = parse_feed(xml, NOW)
+    assert a.image_url == "https://www.mmaweekly.com/a.jpg"
+    assert b.image_url == "https://ichef.bbci.co.uk/ace/standard/976/cps/x.jpg"
+    assert a.image_credit is None
+
+
+def test_image_credit_is_unescaped_and_loses_its_prefix():
+    xml = """<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+      <title>T</title><link>https://www.mmaweekly.com/t</link>
+      <media:content url="https://www.mmaweekly.com/t.jpg" medium="image">
+        <media:credit>Photo by Chris Unger&amp;sol;Zuffa LLC</media:credit></media:content>
+    </item></channel></rss>"""
+    assert parse_feed(xml, NOW)[0].image_credit == "Chris Unger/Zuffa LLC"
+
+
+@pytest.mark.parametrize("key", ["mmaweekly", "bbc", "guardian"])
+def test_photo_feeds_have_an_image_for_every_story(key):
+    items = parse_feed(feed_xml(key), NOW)
+    assert items and all(item.image_url and item.image_url.startswith("https://") for item in items)
+
+
 def test_strip_html():
     assert strip_html('<a href="x">Jon Jones</a> &amp; Stipe   Miocic') == "Jon Jones & Stipe Miocic"
     assert strip_html("<p></p>") is None
@@ -173,5 +213,5 @@ def test_sync_news_stores_new_items_and_keeps_going_after_a_broken_feed():
     assert summary["deleted"] == 2
     first = conn.inserted[0]
     assert first[:3] == ("espn", "ESPN", "https://www.espn.com/1")
-    assert first[6] == "injury"
+    assert first[7] == "injury"
     assert conn.tags == [("n-0", "f-proch")]

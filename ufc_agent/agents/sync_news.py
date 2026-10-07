@@ -26,11 +26,15 @@ class Feed:
 
 
 # Feeds whose terms allow showing headlines with a credit and a link back. Google News is left out:
-# its feeds are for personal, non-commercial use only.
+# its feeds are for personal, non-commercial use only. The last three carry a photo for every story.
+# MMA News is left out: its Cloudflare setup blocks non-browser clients.
 FEEDS = (
     Feed("espn", "ESPN", "https://www.espn.com/espn/rss/mma/news"),
     Feed("ufc", "UFC.com", "https://www.ufc.com/rss/news"),
     Feed("sherdog", "Sherdog", "https://www.sherdog.com/rss/news.xml"),
+    Feed("mmaweekly", "MMA Weekly", "https://www.mmaweekly.com/feed"),
+    Feed("bbc", "BBC Sport", "https://www.bbc.co.uk/sport/mixed-martial-arts/rss.xml"),
+    Feed("guardian", "The Guardian", "https://www.theguardian.com/sport/ufc/rss"),
 )
 
 # An honest feed-reader agent. ESPN answers the shared browser-like agent with an empty 202.
@@ -71,6 +75,7 @@ class NewsItem:
     summary: str | None
     image_url: str | None
     published_at: datetime.datetime
+    image_credit: str | None = None
     kind: str = "news"
     fighter_ids: list[str] = field(default_factory=list)
 
@@ -106,14 +111,37 @@ def _text(item, path):
     return node.text.strip() if node is not None and node.text else None
 
 
+# BBC thumbnails are 240px wide; the same image is served at 976px by changing the size segment.
+BBC_THUMB_RE = re.compile(r"(ichef\.bbci\.co\.uk/ace/standard/)\d+/")
+
+
 def _image(item):
+    """The widest https image the item offers (media:content, media:thumbnail or enclosure), or None.
+
+    Some feeds put junk in type (MMA Weekly sends type="false"), so only an explicit non-image type or
+    medium rules a candidate out.
+    """
+    best, best_width = None, -1
     for path in ("media:content", "media:thumbnail", "enclosure"):
         for node in item.findall(path, NS):
             url = node.get("url")
-            kind = node.get("type") or node.get("medium") or "image"
-            if url and url.startswith("https://") and "image" in kind:
-                return url
-    return None
+            kind = (node.get("medium") or node.get("type") or "image").lower()
+            if not url or not url.startswith("https://") or kind.startswith(("video", "audio")):
+                continue
+            width = int(node.get("width") or 0) if (node.get("width") or "").isdigit() else 0
+            if width > best_width:
+                best, best_width = url, width
+    return BBC_THUMB_RE.sub(r"\g<1>976/", best) if best else None
+
+
+def _image_credit(item):
+    """Photographer credit from media:credit, e.g. 'Photograph: Dean Lewins/AAP' -> 'Dean Lewins/AAP'
+    and 'Photo by Chris Unger&sol;Zuffa LLC' -> 'Chris Unger/Zuffa LLC'."""
+    credit = _text(item, ".//media:credit")
+    if not credit:
+        return None
+    credit = html.unescape(credit)
+    return re.sub(r"^(photograph|photo|image)( by)?\s*:?\s*", "", credit, flags=re.I).strip()[:200] or None
 
 
 def parse_feed(xml_text, now):
@@ -126,7 +154,9 @@ def parse_feed(xml_text, now):
             continue
         published = parse_date(_text(item, "dc:date"), now) or parse_date(_text(item, "pubDate"), now) or now
         summary = strip_html(_text(item, "description") or _text(item, "content:encoded"))
-        items.append(NewsItem(url=url, title=title, summary=summary, image_url=_image(item), published_at=published))
+        image = _image(item)
+        items.append(NewsItem(url=url, title=title, summary=summary, image_url=image, published_at=published,
+                              image_credit=_image_credit(item) if image else None))
     return items
 
 
@@ -169,10 +199,10 @@ def save_items(conn, feed, items):
     new = 0
     for item in items:
         row = conn.execute(
-            "INSERT INTO news_items (source, source_name, url, title, summary, image_url, kind, published_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (url) DO NOTHING RETURNING id",
-            (feed.key, feed.name, item.url, item.title[:500], item.summary, item.image_url, item.kind,
-             item.published_at),
+            "INSERT INTO news_items (source, source_name, url, title, summary, image_url, image_credit, kind, "
+            "published_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (url) DO NOTHING RETURNING id",
+            (feed.key, feed.name, item.url, item.title[:500], item.summary, item.image_url, item.image_credit,
+             item.kind, item.published_at),
         ).fetchone()
         if row is None:
             continue
@@ -186,8 +216,11 @@ def save_items(conn, feed, items):
     return new
 
 
-def sync_news(conn, fetcher, feeds=FEEDS, now=None):
-    """Fetch every feed and store new items. One broken feed does not stop the others."""
+def sync_news(conn, fetcher, feeds=FEEDS, now=None, fill_images=None):
+    """Fetch every feed and store new items. One broken feed does not stop the others.
+
+    fill_images(conn) gives stories without a feed photo a fighter photo or a stock photo; see news_images.
+    """
     now = now or datetime.datetime.now(datetime.timezone.utc)
     fighters = conn.execute(
         "SELECT id, name, raw_payload->'aliases' AS aliases FROM fighters WHERE name IS NOT NULL"
@@ -213,21 +246,29 @@ def sync_news(conn, fetcher, feeds=FEEDS, now=None):
         "DELETE FROM news_items WHERE published_at < %s", (now - datetime.timedelta(days=KEEP_DAYS),)
     ).rowcount
     conn.commit()
-    return {"feeds": per_feed, "errors": errors, "deleted": deleted}
+    summary = {"feeds": per_feed, "errors": errors, "deleted": deleted}
+    if fill_images is not None:
+        summary["images"] = fill_images(conn)
+    return summary
 
 
 def main():
     import httpx
 
+    from urllib.parse import urlparse
+
+    from ufc_agent.agents.news_images import NewsImages
     from ufc_agent.db import connect
-    from ufc_agent.fetch.http import Fetcher
+    from ufc_agent.fetch.http import DEFAULT_ALLOWED_DOMAINS, Fetcher
     from ufc_agent.runlog import RunLog
 
     conn = connect()
     run_log = RunLog(conn, "sync_news", {"feeds": [feed.key for feed in FEEDS]})
     try:
         client = httpx.Client(headers={"User-Agent": FEED_USER_AGENT}, timeout=20, follow_redirects=True)
-        summary = sync_news(conn, Fetcher(min_interval=1.0, client=client))
+        domains = {*DEFAULT_ALLOWED_DOMAINS, *(urlparse(feed.url).hostname.removeprefix("www.") for feed in FEEDS)}
+        fetcher = Fetcher(allowed_domains=domains, min_interval=1.0, client=client, cache_dir=None)
+        summary = sync_news(conn, fetcher, fill_images=NewsImages(fetcher).fill)
     except Exception as exc:
         conn.rollback()
         run_log.finish(status="error", error=str(exc))
