@@ -69,6 +69,7 @@ Where search works and where it does not:
 | `live_event` | From event start until the main event ends | Only on change | Fetch the results page every 2 minutes and hash it. Run the agent only when the hash changes. Fallback: a search every 10 minutes. |
 | `post_event_stats` | Event day +1, again at +2 | Yes | Fill per-fight stats, mark the event `completed`, confirm results. |
 | `refresh_fighters` | After `post_event_stats` | Yes | Update record and career stats, only for fighters who just fought (about 28 per event). |
+| `sync_news` | Hourly | No | Read the ESPN, UFC.com and Sherdog RSS feeds into `news_items`. Tag fighters by name and sort stories into kinds with keyword rules. Store headlines and summaries unchanged, and keep 30 days. |
 | `ask` | API call | Yes | Answer ad-hoc questions using read-only DB tools. |
 
 The live job keeps LLM calls to roughly 14 to 30 per event instead of about 360.
@@ -284,6 +285,7 @@ docs/                    this plan
      | `post-event-stats.yml` | 04:00, 10:00, 16:00, 22:00 | `ufc_agent.agents.post_event_stats` |
      | `refresh-fighters.yml` | daily 11:30 | `ufc_agent.agents.refresh_fighters` |
      | `live-event.yml` | hourly at :05 | `ufc_agent.agents.live_event --auto --max-hours 5.8` |
+     | `sync-news.yml` | hourly at :17 | `ufc_agent.agents.sync_news` |
 
    - Live: `--auto` reads each nearby event's real start from ufc.com
      (`.c-event-fight-card-broadcaster__time[data-timestamp]`), stores it in `events.starts_at`, and
