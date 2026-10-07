@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from ufc_agent.agents.loop import run_agent
+from ufc_agent.backend import notify_backend
 from ufc_agent.config import PROJECT_ROOT
 from ufc_agent.fetch.http import FetchError
 from ufc_agent.fetch.ufc_card import bout_line, card_fingerprint, event_start, has_result, parse_card
@@ -104,8 +105,12 @@ class LiveEventAgent:
 
 
 def watch(agent, run_log, event_id, event_name, source_url, fetch_html, poll_seconds=POLL_SECONDS,
-          max_hours=MAX_HOURS, sleep=time.sleep, clock=time.monotonic, single_pass=False) -> dict:
-    """Poll until no bout is pending, the page shows every bout finished, or max_hours pass."""
+          max_hours=MAX_HOURS, sleep=time.sleep, clock=time.monotonic, single_pass=False,
+          on_results=None) -> dict:
+    """Poll until no bout is pending, the page shows every bout finished, or max_hours pass.
+
+    on_results() is called after a poll that saved at least one result (the backend nudge).
+    """
     stats = {"polls": 0, "page_changes": 0, "agent_runs": 0, "searches": 0, "submitted": 0, "flagged": 0,
              "fetch_failures": 0, "quota_waits": 0}
     deadline = clock() + max_hours * 3600
@@ -132,12 +137,16 @@ def watch(agent, run_log, event_id, event_name, source_url, fetch_html, poll_sec
                     stats["agent_runs"] += result["agent_ran"]
                     stats["submitted"] += result["submitted"]
                     stats["flagged"] += result["flagged"]
+                    if result["submitted"] and on_results:
+                        on_results()
             elif failures >= FETCH_FAILURES_BEFORE_SEARCH and clock() - last_search >= SEARCH_EVERY_SECONDS:
                 last_search = clock()
                 result = agent.search(run_log, event_id, event_name)
                 stats["searches"] += 1
                 stats["submitted"] += result["submitted"]
                 stats["flagged"] += result["flagged"]
+                if result["submitted"] and on_results:
+                    on_results()
         except QuotaExhausted:
             # Keep watching: the page is re-read next poll and processed once a provider is back.
             stats["quota_waits"] += 1
@@ -228,10 +237,15 @@ def main():
 
     agent = LiveEventAgent(LLMClient.from_env(), ToolRegistry(db_tools, fetcher))
     db_tools.set_event_live(args.event_id)
+    # Shadow runs save nothing, so there is nothing to tell users about.
+    nudge = None if shadow else (lambda: notify_backend("live results"))
+    if nudge:
+        nudge()  # "event is live" notification
     run_log = RunLog(conn, "live_event", {"event_id": args.event_id, "url": source_url, "shadow": shadow})
     try:
         result = watch(agent, run_log, args.event_id, event["name"], source_url, fetch_html,
-                       poll_seconds=args.poll, max_hours=args.max_hours, single_pass=bool(args.html_file))
+                       poll_seconds=args.poll, max_hours=args.max_hours, single_pass=bool(args.html_file),
+                       on_results=nudge)
     except Exception as exc:
         run_log.finish(status="error", error=str(exc))
         raise

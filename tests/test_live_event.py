@@ -145,6 +145,13 @@ def test_watch_runs_agent_only_when_page_changes_and_stops_when_card_finished():
     assert result["polls"] == 3 and result["submitted"] == 14
 
 
+def test_watch_nudges_backend_only_after_saving_results():
+    agent = FakeAgent(pending_after=99)
+    nudges = []
+    run_watch(agent, [UPCOMING, UPCOMING, COMPLETED, COMPLETED], on_results=lambda: nudges.append(1))
+    assert nudges == [1]  # the upcoming page saved nothing; the completed page saved 14
+
+
 def test_watch_stops_when_nothing_pending():
     agent = FakeAgent(pending_after=1)
     assert run_watch(agent, [COMPLETED])["stopped"] == "no_pending_bouts"

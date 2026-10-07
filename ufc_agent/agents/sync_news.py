@@ -275,6 +275,9 @@ def main():
         conn.rollback()
         run_log.finish(status="error", error=str(exc))
         raise
+    if any(feed["new"] for feed in summary["feeds"].values()):
+        from ufc_agent.backend import notify_backend
+        summary["notified"] = notify_backend("news")
     status = "completed" if not summary["errors"] else ("partial" if summary["feeds"] else "error")
     run_log.finish(status=status, summary=summary)
     print(json.dumps(summary, indent=2))
