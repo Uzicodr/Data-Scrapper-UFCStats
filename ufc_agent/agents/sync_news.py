@@ -257,7 +257,7 @@ def main():
 
     from urllib.parse import urlparse
 
-    from ufc_agent.agents.news_images import NewsImages
+    from ufc_agent.agents.news_images import WIKI_USER_AGENT, NewsImages
     from ufc_agent.db import connect
     from ufc_agent.fetch.http import DEFAULT_ALLOWED_DOMAINS, Fetcher
     from ufc_agent.runlog import RunLog
@@ -268,7 +268,9 @@ def main():
         client = httpx.Client(headers={"User-Agent": FEED_USER_AGENT}, timeout=20, follow_redirects=True)
         domains = {*DEFAULT_ALLOWED_DOMAINS, *(urlparse(feed.url).hostname.removeprefix("www.") for feed in FEEDS)}
         fetcher = Fetcher(allowed_domains=domains, min_interval=1.0, client=client, cache_dir=None)
-        summary = sync_news(conn, fetcher, fill_images=NewsImages(fetcher).fill)
+        wiki_client = httpx.Client(headers={"User-Agent": WIKI_USER_AGENT}, timeout=20, follow_redirects=True)
+        wiki = Fetcher(min_interval=1.0, client=wiki_client, cache_dir=None)
+        summary = sync_news(conn, fetcher, fill_images=NewsImages(wiki).fill)
     except Exception as exc:
         conn.rollback()
         run_log.finish(status="error", error=str(exc))

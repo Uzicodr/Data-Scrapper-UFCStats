@@ -16,7 +16,12 @@ import zlib
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
+from ufc_agent.fetch.http import FetchError
+
 WIKI_API = "https://en.wikipedia.org/w/api.php"
+# Wikimedia's User-Agent policy wants a tool name plus a way to reach the operator; requests without
+# one get HTTP 403, especially from cloud IPs such as GitHub Actions runners.
+WIKI_USER_AGENT = "OctapulseNews/1.0 (https://github.com/Uzicodr/Data-Scrapper-UFCStats) httpx"
 RECHECK_DAYS = 30
 BATCH = 50  # API limit on titles per query
 IMAGE_WIDTH = 1200
@@ -132,12 +137,16 @@ class NewsImages:
     """Fills news_items.image_url (and credit columns) for stories saved without a photo."""
 
     def __init__(self, fetcher, photos=None):
+        """fetcher must send WIKI_USER_AGENT; see sync_news.main."""
         self.photos = photos or WikipediaPhotos(
             lambda params: json.loads(fetcher.get(f"{WIKI_API}?{urlencode(params)}", use_cache=False))
         )
 
     def refresh_fighter_photos(self, conn, now):
-        """Look up tagged fighters never checked, or checked more than RECHECK_DAYS ago."""
+        """Look up tagged fighters never checked, or checked more than RECHECK_DAYS ago.
+
+        Raises FetchError when Wikipedia can't be reached; nothing is cached then, so the next run retries.
+        """
         rows = conn.execute(
             "SELECT DISTINCT f.id, f.name FROM news_items n "
             "JOIN news_item_fighters nf ON nf.news_id = n.id JOIN fighters f ON f.id = nf.fighter_id "
@@ -163,8 +172,15 @@ class NewsImages:
         return len(found)
 
     def fill(self, conn, now=None):
+        """Give photo-less stories a fighter photo, else a stock photo. Never raises for Wikipedia trouble:
+        stories naming a fighter not looked up yet just wait for a later run instead of getting stock."""
         now = now or datetime.datetime.now(datetime.timezone.utc)
-        found = self.refresh_fighter_photos(conn, now)
+        error = None
+        try:
+            found = self.refresh_fighter_photos(conn, now)
+        except FetchError as exc:
+            conn.rollback()
+            found, error = 0, str(exc)
         fighter = conn.execute(
             "UPDATE news_items n SET image_url = p.image_url, image_credit = p.credit, "
             "image_license = p.license, image_credit_url = p.credit_url "
@@ -173,7 +189,11 @@ class NewsImages:
             "      JOIN fighters f ON f.id = nf.fighter_id ORDER BY nf.news_id, f.name) p "
             "WHERE n.id = p.news_id AND n.image_url IS NULL"
         ).rowcount
-        rows = conn.execute("SELECT id, url FROM news_items WHERE image_url IS NULL").fetchall()
+        rows = conn.execute(
+            "SELECT n.id, n.url FROM news_items n WHERE n.image_url IS NULL AND NOT EXISTS ("
+            "  SELECT 1 FROM news_item_fighters nf LEFT JOIN fighter_photos fp ON fp.fighter_id = nf.fighter_id"
+            "  WHERE nf.news_id = n.id AND fp.fighter_id IS NULL)"
+        ).fetchall()
         for row in rows:
             photo = stock_photo(row["url"])
             conn.execute(
@@ -182,4 +202,7 @@ class NewsImages:
                 (photo.url, photo.credit, photo.license, photo.credit_url, row["id"]),
             )
         conn.commit()
-        return {"fighter_photos_found": found, "from_fighters": fighter, "from_stock": len(rows)}
+        result = {"fighter_photos_found": found, "from_fighters": fighter, "from_stock": len(rows)}
+        if error:
+            result["wikipedia_error"] = error
+        return result
