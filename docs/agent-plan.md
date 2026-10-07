@@ -72,6 +72,8 @@ Where search works and where it does not:
 | `sync_news` | Hourly | No | Read the ESPN, UFC.com, Sherdog, MMA Weekly, BBC Sport and Guardian RSS feeds into `news_items`. Tag fighters by name and sort stories into kinds with keyword rules. Store headlines and summaries unchanged, and keep 30 days. Stories without a feed photo get a free Wikipedia photo of a tagged fighter (cached in `fighter_photos`) or an Unsplash cage photo, with credits. |
 | `ask` | API call | Yes | Answer ad-hoc questions using read-only DB tools. |
 
+After `live_event` saves results and after `sync_news` saves new stories, the job calls the backend's `POST /internal/notify` (`ufc_agent/backend.py`) so push notifications go out at once. It needs the `BACKEND_URL` variable and `INTERNAL_TOKEN` secret; without them the call is skipped.
+
 The live job keeps LLM calls to roughly 14 to 30 per event instead of about 360.
 
 ## 6. Tools

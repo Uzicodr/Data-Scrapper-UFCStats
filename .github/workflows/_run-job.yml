@@ -35,6 +35,9 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           LLM_CHAIN: ${{ vars.LLM_CHAIN }}
+          # Lets jobs wake the backend to send notifications right away (see ufc_agent/backend.py).
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          INTERNAL_TOKEN: ${{ secrets.INTERNAL_TOKEN }}
           PYTHONUNBUFFERED: "1"
         run: python -m ${{ inputs.command }}
 
